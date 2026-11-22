@@ -861,17 +861,13 @@ public class MainActivity extends Activity {
                         List<File> installFiles = new ArrayList<>();
                         installFiles.add(res.file);
 
-                        if (!exportOnly && externalApk == null && app.splitDirs != null) {
+                        if (externalApk == null && app.splitDirs != null) {
                             int spIdx = 0;
                             for (String spPath : app.splitDirs) {
                                 spIdx++;
                                 Cloner.Options spOpts = copyOptions(opts);
                                 spOpts.isSplit = true;
-                                spOpts.tintIcon = false;
-                                spOpts.badgeIcon = false;
-                                spOpts.flipIcon = false;
-                                spOpts.rotateIcon = 0;
-                                spOpts.badgeText = null;
+                                spOpts.iconRoles = res.iconRoles;
                                 spOpts.customLabel = null;
                                 spOpts.customVersionName = null;
                                 spOpts.overridePackage = res.newPackage;
@@ -883,7 +879,23 @@ public class MainActivity extends Activity {
 
                         ok++;
                         if (exportOnly) {
-                            exportedFile = res.file;
+                            if (installFiles.size() > 1) {
+                                File bundleZip = new File(batchDir, res.newPackage + ".apks");
+                                try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(new FileOutputStream(bundleZip))) {
+                                    byte[] zbuf = new byte[65536];
+                                    for (File f : installFiles) {
+                                        zos.putNextEntry(new java.util.zip.ZipEntry(f.getName()));
+                                        try (FileInputStream fis = new FileInputStream(f)) {
+                                            int r;
+                                            while ((r = fis.read(zbuf)) > 0) zos.write(zbuf, 0, r);
+                                        }
+                                        zos.closeEntry();
+                                    }
+                                }
+                                exportedFile = bundleZip;
+                            } else {
+                                exportedFile = res.file;
+                            }
                             exportedPkg = res.newPackage;
                         } else {
                             String installedPkg = res.newPackage;
@@ -920,10 +932,13 @@ public class MainActivity extends Activity {
 
     private void launchExportPicker(File apkFile, String pkgName) {
         pendingExportApk = apkFile;
+        boolean isBundle = apkFile != null && apkFile.getName().endsWith(".apks");
+        String ext = isBundle ? ".apks" : ".apk";
+        String mime = isBundle ? "application/zip" : "application/vnd.android.package-archive";
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT)
                 .addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("application/vnd.android.package-archive")
-                .putExtra(Intent.EXTRA_TITLE, (pkgName != null ? pkgName : "clone") + ".apk");
+                .setType(mime)
+                .putExtra(Intent.EXTRA_TITLE, (pkgName != null ? pkgName : "clone") + ext);
         startActivityForResult(i, REQ_EXPORT_APK);
     }
 
@@ -1080,7 +1095,8 @@ public class MainActivity extends Activity {
             Uri uri = data.getData();
             worker.execute(() -> {
                 try {
-                    File picked = new File(getCacheDir(), "picked_" + System.currentTimeMillis() + ".apk");
+                    long stamp = System.currentTimeMillis();
+                    File picked = new File(getCacheDir(), "picked_" + stamp + ".apk");
                     try (InputStream in = getContentResolver().openInputStream(uri);
                          FileOutputStream out = new FileOutputStream(picked)) {
                         if (in == null) throw new IllegalStateException("Cannot open picked URI");
@@ -1088,22 +1104,38 @@ public class MainActivity extends Activity {
                         int r;
                         while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
                     }
-                    String pkg = Cloner.packageOf(picked);
-                    PackageInfo pi = getPackageManager().getPackageArchiveInfo(picked.getAbsolutePath(), 0);
+                    File bundleDir = new File(getCacheDir(), "picked_bundle_" + stamp);
+                    File[] unpacked = Cloner.unpackApkOrBundle(picked, bundleDir);
+                    File baseApk = unpacked[0];
+                    String pkg = Cloner.packageOf(baseApk);
+                    PackageInfo pi = getPackageManager().getPackageArchiveInfo(baseApk.getAbsolutePath(), 0);
                     AppRow extRow = new AppRow();
                     extRow.pkg = pkg;
-                    extRow.sourceDir = picked.getAbsolutePath();
+                    extRow.sourceDir = baseApk.getAbsolutePath();
+                    if (unpacked.length > 1) {
+                        String[] splits = new String[unpacked.length - 1];
+                        for (int i = 1; i < unpacked.length; i++) {
+                            splits[i - 1] = unpacked[i].getAbsolutePath();
+                        }
+                        extRow.splitDirs = splits;
+                    }
                     if (pi != null && pi.applicationInfo != null) {
-                        pi.applicationInfo.sourceDir = picked.getAbsolutePath();
-                        pi.applicationInfo.publicSourceDir = picked.getAbsolutePath();
-                        extRow.label = String.valueOf(pi.applicationInfo.loadLabel(getPackageManager()));
+                        pi.applicationInfo.sourceDir = baseApk.getAbsolutePath();
+                        pi.applicationInfo.publicSourceDir = baseApk.getAbsolutePath();
+                        if (extRow.splitDirs != null) {
+                            pi.applicationInfo.splitSourceDirs = extRow.splitDirs;
+                            pi.applicationInfo.splitPublicSourceDirs = extRow.splitDirs;
+                        }
+                        CharSequence lbl = pi.applicationInfo.loadLabel(getPackageManager());
+                        extRow.label = (lbl != null && lbl.length() > 0) ? String.valueOf(lbl) : pkg;
                         extRow.icon = pi.applicationInfo.loadIcon(getPackageManager());
                     } else {
                         extRow.label = pkg;
                     }
-                    runOnUiThread(() -> openCloneStudio(extRow, picked, updateTarget));
+                    final File singleExternal = unpacked.length == 1 ? baseApk : null;
+                    runOnUiThread(() -> openCloneStudio(extRow, singleExternal, updateTarget));
                 } catch (Throwable t) {
-                    runOnUiThread(() -> Toast.makeText(this, "Cannot read APK: " + t.getMessage(), Toast.LENGTH_LONG).show());
+                    runOnUiThread(() -> Toast.makeText(this, "Cannot read APK/XAPK: " + t.getMessage(), Toast.LENGTH_LONG).show());
                 }
             });
         }
@@ -1115,7 +1147,9 @@ public class MainActivity extends Activity {
             File[] cacheFiles = getCacheDir().listFiles();
             if (cacheFiles != null) {
                 for (File f : cacheFiles) {
-                    if (f.getName().startsWith("picked_") && f.delete()) deleted++;
+                    if (f.getName().startsWith("picked_")) {
+                        deleted += f.isDirectory() ? deleteDir(f) : (f.delete() ? 1 : 0);
+                    }
                 }
             }
             final int total = deleted;

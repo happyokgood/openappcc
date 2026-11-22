@@ -114,6 +114,30 @@ public final class Doctor {
 
     public static String inspectReport(File apkFile) {
         if (apkFile == null || !apkFile.isFile()) return "APK file not found.";
+        try (ZipFile probe = new ZipFile(apkFile)) {
+            if (probe.getEntry("AndroidManifest.xml") == null) {
+                File tmpDir = new File(apkFile.getParentFile(), "doc_bundle_" + System.currentTimeMillis());
+                try {
+                    File[] parts = Cloner.unpackApkOrBundle(apkFile, tmpDir);
+                    String baseRep = inspectReport(parts[0]);
+                    if (parts.length > 1) {
+                        StringBuilder b = new StringBuilder("Bundle Splits (").append(parts.length).append(" APKs): ");
+                        for (int i = 0; i < parts.length; i++) {
+                            if (i > 0) b.append(", ");
+                            b.append(parts[i].getName());
+                        }
+                        b.append("\n").append(baseRep);
+                        return b.toString();
+                    }
+                    return baseRep;
+                } finally {
+                    File[] kids = tmpDir.listFiles();
+                    if (kids != null) for (File k : kids) k.delete();
+                    tmpDir.delete();
+                }
+            }
+        } catch (Exception ignored) {
+        }
         StringBuilder sb = new StringBuilder();
         try (ZipFile zip = new ZipFile(apkFile)) {
             ZipEntry man = zip.getEntry("AndroidManifest.xml");

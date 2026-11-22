@@ -81,6 +81,7 @@ public final class Cloner {
         public boolean noBackup = false;
         public boolean isSplit = false;
         public String overridePackage;
+        public Map<String, String> iconRoles;
     }
 
     public static final class Result {
@@ -92,6 +93,7 @@ public final class Cloner {
         public int iconFiles;
         public final List<String[]> forcedPairs = new ArrayList<>();
         public final List<String> warnings = new ArrayList<>();
+        public final Map<String, String> iconRoles = new LinkedHashMap<>();
         public File file;
         public static volatile String stage = "start";
     }
@@ -190,6 +192,73 @@ public final class Cloner {
             Axml.Attr pkg = manifest == null ? null : Axml.attr(manifest, "package");
             if (pkg == null || pkg.raw == null) throw new IllegalStateException("manifest has no package");
             return pkg.raw;
+        }
+    }
+
+    public static boolean isSplitApk(File apk) throws Exception {
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry man = zip.getEntry("AndroidManifest.xml");
+            if (man == null) throw new IllegalStateException("AndroidManifest.xml missing");
+            Axml ax;
+            try (InputStream in = zip.getInputStream(man)) {
+                ax = Axml.parse(readAll(in));
+            }
+            Axml.Node manifest = ax.element("manifest");
+            Axml.Attr sp = manifest == null ? null : Axml.attr(manifest, "split");
+            return sp != null && sp.raw != null && !sp.raw.isEmpty();
+        }
+    }
+
+    public static File[] unpackApkOrBundle(File pickedFile, File destDir) throws Exception {
+        try (ZipFile zip = new ZipFile(pickedFile)) {
+            if (zip.getEntry("AndroidManifest.xml") != null) {
+                return new File[]{pickedFile};
+            }
+            destDir.mkdirs();
+            List<File> innerApks = new ArrayList<>();
+            Set<String> seenNames = new HashSet<>();
+            byte[] buf = new byte[65536];
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            int idx = 0;
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                if (e.isDirectory()) continue;
+                String entryName = e.getName();
+                if (!entryName.toLowerCase(Locale.US).endsWith(".apk")) continue;
+                idx++;
+                int slash = Math.max(entryName.lastIndexOf('/'), entryName.lastIndexOf('\\'));
+                String baseName = slash >= 0 ? entryName.substring(slash + 1) : entryName;
+                if (baseName.isEmpty() || !seenNames.add(baseName)) {
+                    baseName = idx + "_" + (baseName.isEmpty() ? "part.apk" : baseName);
+                    seenNames.add(baseName);
+                }
+                File out = new File(destDir, baseName);
+                try (InputStream in = zip.getInputStream(e);
+                     FileOutputStream fos = new FileOutputStream(out)) {
+                    int r;
+                    while ((r = in.read(buf)) > 0) fos.write(buf, 0, r);
+                }
+                innerApks.add(out);
+            }
+            if (innerApks.isEmpty()) {
+                throw new IllegalStateException("AndroidManifest.xml missing (no inner .apk in bundle)");
+            }
+            File baseApk = null;
+            List<File> splits = new ArrayList<>();
+            for (File f : innerApks) {
+                if (baseApk == null && !isSplitApk(f)) {
+                    baseApk = f;
+                } else {
+                    splits.add(f);
+                }
+            }
+            if (baseApk == null) {
+                throw new IllegalStateException("Bundle has no base APK (all inner APKs have split attribute)");
+            }
+            List<File> ordered = new ArrayList<>(1 + splits.size());
+            ordered.add(baseApk);
+            ordered.addAll(splits);
+            return ordered.toArray(new File[0]);
         }
     }
 
@@ -338,6 +407,61 @@ public final class Cloner {
             }
         }
         return changed;
+    }
+
+    private static boolean containsBytes(byte[] hay, byte[] needle) {
+        if (needle.length == 0 || hay.length < needle.length) return false;
+        outer:
+        for (int i = 0; i <= hay.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (hay[i + j] != needle[j]) continue outer;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    static byte[] patchResXml(byte[] raw, String oldPkg, String newPkg, boolean renameClasses) {
+        if (raw == null || raw.length < 8 || oldPkg.equals(newPkg)) return raw;
+        if (raw[0] != 0x03 || raw[1] != 0x00 || raw[2] != 0x08 || raw[3] != 0x00) return raw;
+        if (!containsBytes(raw, oldPkg.getBytes(StandardCharsets.UTF_8))
+                && !containsBytes(raw, oldPkg.getBytes(StandardCharsets.UTF_16LE))) {
+            return raw;
+        }
+        try {
+            Axml ax = Axml.parse(raw);
+            boolean changed = false;
+            boolean doClasses = renameClasses && oldPkg.length() == newPkg.length();
+            String vndOld = "vnd." + oldPkg + ".";
+            String vndNew = "vnd." + newPkg + ".";
+            for (Axml.Node n : ax.nodes) {
+                if (n.kind != Axml.START) continue;
+                for (Axml.Attr a : n.attrs) {
+                    if (a.type != 0x03 || a.raw == null) continue;
+                    if (!doClasses && ("targetClass".equals(a.name) || "fragment".equals(a.name)
+                            || "settingsActivity".equals(a.name) || "configure".equals(a.name))) {
+                        continue;
+                    }
+                    String val = a.raw;
+                    String nxt = val;
+                    if (val.equals(oldPkg)) {
+                        nxt = newPkg;
+                    } else if (val.startsWith(oldPkg + ".") || val.startsWith(oldPkg + ":")) {
+                        nxt = newPkg + val.substring(oldPkg.length());
+                    } else if (val.contains(vndOld)) {
+                        nxt = val.replace(vndOld, vndNew);
+                    }
+                    if (!nxt.equals(val)) {
+                        a.raw = nxt;
+                        a.data = 0;
+                        changed = true;
+                    }
+                }
+            }
+            return changed ? ax.toBytes() : raw;
+        } catch (Throwable ignored) {
+            return raw;
+        }
     }
 
     static void resolveAuthorityRefs(Axml ax, byte[] arscBytes) {
@@ -693,20 +817,38 @@ public final class Cloner {
         }
     }
 
-    static void patchIcons(ZipFile zip, Axml ax, byte[] arsc, Options opts, Map<String, byte[]> out) throws Exception {
-        Axml.Node app = ax.element("application");
+    static void patchIcons(ZipFile zip, Axml ax, byte[] arsc, Options opts, Map<String, byte[]> out,
+                           Map<String, String> discoveredRoles) throws Exception {
         LinkedHashMap<String, String> wanted = new LinkedHashMap<>();
-        if (app != null && arsc != null) {
-            for (String attribute : new String[]{"icon", "roundIcon", "logo"}) {
-                Axml.Attr at = Axml.attr(app, attribute);
-                if (at == null || at.type != 0x01) continue;
-                for (String path : Arsc.paths(arsc, at.data)) {
-                    if (path == null) continue;
-                    if (Icon.isRaster(path)) wanted.putIfAbsent(path, "icon");
-                    else if (path.toLowerCase(Locale.US).endsWith(".xml")) addLayers(zip, arsc, path, wanted);
+        if (opts.iconRoles != null) wanted.putAll(opts.iconRoles);
+        if (!opts.isSplit && arsc != null) {
+            Axml.Node app = ax.element("application");
+            if (app != null) {
+                for (String attribute : new String[]{"icon", "roundIcon", "logo"}) {
+                    Axml.Attr at = Axml.attr(app, attribute);
+                    if (at == null || at.type != 0x01) continue;
+                    for (String path : Arsc.paths(arsc, at.data)) {
+                        if (path == null) continue;
+                        if (Icon.isRaster(path)) wanted.putIfAbsent(path, "icon");
+                        else if (path.toLowerCase(Locale.US).endsWith(".xml")) addLayers(zip, arsc, path, wanted);
+                    }
+                }
+            }
+            for (Axml.Node n : ax.nodes) {
+                if (n.kind != Axml.START) continue;
+                if (!"activity".equals(n.name) && !"activity-alias".equals(n.name)) continue;
+                for (String attribute : new String[]{"icon", "roundIcon"}) {
+                    Axml.Attr at = Axml.attr(n, attribute);
+                    if (at == null || at.type != 0x01) continue;
+                    for (String path : Arsc.paths(arsc, at.data)) {
+                        if (path == null) continue;
+                        if (Icon.isRaster(path)) wanted.putIfAbsent(path, "icon");
+                        else if (path.toLowerCase(Locale.US).endsWith(".xml")) addLayers(zip, arsc, path, wanted);
+                    }
                 }
             }
         }
+        if (discoveredRoles != null) discoveredRoles.putAll(wanted);
         boolean hasBadgeText = opts.badgeText != null && !opts.badgeText.trim().isEmpty();
         boolean drawBadge = opts.badgeIcon || hasBadgeText;
         for (Map.Entry<String, String> e : wanted.entrySet()) {
@@ -989,9 +1131,9 @@ public final class Cloner {
             Map<String, byte[]> iconPatches = new LinkedHashMap<>();
             boolean wantsIconEdit = opts.tintIcon || opts.badgeIcon || opts.flipIcon || (opts.rotateIcon % 360 != 0)
                     || (opts.badgeText != null && !opts.badgeText.trim().isEmpty());
-            if (!opts.isSplit && wantsIconEdit && arscBytes != null) {
+            if (wantsIconEdit && ((!opts.isSplit && arscBytes != null) || (opts.iconRoles != null && !opts.iconRoles.isEmpty()))) {
                 Result.stage = "paint icons";
-                patchIcons(zip, ax, arscBytes, opts, iconPatches);
+                patchIcons(zip, ax, arscBytes, opts, iconPatches, result.iconRoles);
                 result.iconFiles = iconPatches.size();
             }
 
@@ -1044,6 +1186,7 @@ public final class Cloner {
                 boolean isManifest = "AndroidManifest.xml".equals(name);
                 boolean isArsc = "resources.arsc".equals(name);
                 boolean isDex = opts.patchDex && name.matches("classes\\d*\\.dex");
+                boolean isResXml = !opts.isSplit && name.startsWith("res/") && name.endsWith(".xml");
                 boolean deflateSo = opts.compressNativeLibs && name.startsWith("lib/") && name.endsWith(".so");
                 boolean store = isArsc || (!deflateSo && e.getMethod() == ZipEntry.STORED);
 
@@ -1062,6 +1205,10 @@ public final class Cloner {
                     data = dr.bytes;
                     result.dexStringsPatched += dr.replaced;
                     result.dexStringsSkipped += dr.skipped;
+                } else if (isResXml) {
+                    try (InputStream in = zip.getInputStream(e)) {
+                        data = patchResXml(readAll(in), oldPackage, newPackage, opts.renameClasses);
+                    }
                 }
 
                 byte[] iconPatch = iconPatches.get(name);

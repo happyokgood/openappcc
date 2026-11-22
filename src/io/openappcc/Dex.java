@@ -73,9 +73,16 @@ public final class Dex {
         return (s.startsWith("L") && s.endsWith(";")) || s.indexOf('/') >= 0 || s.indexOf('(') >= 0;
     }
 
-    static String replacePkgBoundary(String s, String oldPkg, String newPkg) {
+    static String replacePkgBoundary(String s, String oldPkg, String newPkg, boolean renameClasses) {
         if (s.equals(oldPkg)) return newPkg;
-        if (s.startsWith(oldPkg + ".") || s.startsWith(oldPkg + ":")) return newPkg + s.substring(oldPkg.length());
+        if (s.startsWith(oldPkg + ".") || s.startsWith(oldPkg + ":")) {
+            if (!renameClasses && s.endsWith(".")) return s;
+            return newPkg + s.substring(oldPkg.length());
+        }
+        String vndOld = "vnd." + oldPkg + ".";
+        if (s.contains(vndOld)) {
+            return s.replace(vndOld, "vnd." + newPkg + ".");
+        }
         String marker = "://" + oldPkg;
         int idx = s.indexOf(marker);
         if (idx >= 0) {
@@ -142,7 +149,7 @@ public final class Dex {
                 }
             }
             if (next == null) {
-                String cand = replacePkgBoundary(s, oldPkg, newPkg);
+                String cand = replacePkgBoundary(s, oldPkg, newPkg, doDesc);
                 if (!cand.equals(s)) {
                     next = cand;
                 } else if (doDesc && (s.contains(oldSlash + "/") || s.endsWith("L" + oldSlash + ";") || s.equals(oldSlash))) {
