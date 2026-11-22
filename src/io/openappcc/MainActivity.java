@@ -82,6 +82,7 @@ public class MainActivity extends Activity {
 
     static final class CloneRow {
         String label, pkg, origPkg, sourceDir, versionName;
+        String[] splitDirs;
         long versionCode;
         int cloneNum;
         boolean hasSpoofSig;
@@ -216,7 +217,7 @@ public class MainActivity extends Activity {
 
     private void setupSettings() {
         TextView about = findViewById(R.id.settingsAbout);
-        about.setText("Package: io.openappcc v1.1.0\n"
+        about.setText("Package: io.openappcc v1.2.0\n"
                 + "Engine: AST AXML + ARSC + In-Place DEX + V1/V2/V3 apksig\n"
                 + "Keystore: embedded assets/openappcc.p12\n"
                 + "Tip: Tap any installed app to customize switches or long-press for APK Doctor.");
@@ -287,6 +288,94 @@ public class MainActivity extends Activity {
         return o;
     }
 
+    private boolean hasAppOptions(String pkg) {
+        return pkg != null && prefs.getBoolean("app:" + pkg + ":saved", false);
+    }
+
+    private Cloner.Options loadAppOptions(String primaryPkg, String fallbackPkg) {
+        String scope = hasAppOptions(primaryPkg) ? primaryPkg : (hasAppOptions(fallbackPkg) ? fallbackPkg : null);
+        Cloner.Options d = defaultOptions();
+        if (scope == null) return d;
+        String p = "app:" + scope + ":";
+        d.sameLength = prefs.getBoolean(p + "sameLength", d.sameLength);
+        d.tintIcon = prefs.getBoolean(p + "tintIcon", d.tintIcon);
+        d.badgeIcon = prefs.getBoolean(p + "badgeIcon", d.badgeIcon);
+        d.multiColor = prefs.getBoolean(p + "multiColor", d.multiColor);
+        d.flipIcon = prefs.getBoolean(p + "flipIcon", false);
+        d.rotateIcon = prefs.getInt(p + "rotateIcon", 0);
+        d.badgeText = prefs.getString(p + "badgeText", "");
+        d.customVersionName = prefs.getString(p + "customVersionName", "");
+        d.patchDex = prefs.getBoolean(p + "patchDex", d.patchDex);
+        d.renameClasses = prefs.getBoolean(p + "renameClasses", d.renameClasses);
+        d.spoofSignature = prefs.getBoolean(p + "spoofSignature", d.spoofSignature);
+        d.spoofAndroidId = prefs.getBoolean(p + "spoofAndroidId", d.spoofAndroidId);
+        d.keepDeviceAbiOnly = prefs.getBoolean(p + "keepDeviceAbiOnly", d.keepDeviceAbiOnly);
+        d.compressNativeLibs = prefs.getBoolean(p + "compressNativeLibs", d.compressNativeLibs);
+        d.stripSharedUid = prefs.getBoolean(p + "stripSharedUid", false);
+        d.minTargetSdk = prefs.getInt(p + "minTargetSdk", 0);
+        d.standalone = prefs.getBoolean(p + "standalone", d.standalone);
+        d.noAutostart = prefs.getBoolean(p + "noAutostart", d.noAutostart);
+        d.noWidgets = prefs.getBoolean(p + "noWidgets", false);
+        d.noAppDefaults = prefs.getBoolean(p + "noAppDefaults", false);
+        d.noWearable = prefs.getBoolean(p + "noWearable", false);
+        d.noCrashReporters = prefs.getBoolean(p + "noCrashReporters", d.noCrashReporters);
+        d.excludeRecents = prefs.getBoolean(p + "excludeRecents", false);
+        d.noBackup = prefs.getBoolean(p + "noBackup", false);
+        d.debuggable = prefs.getBoolean(p + "debuggable", false);
+        d.screenshotMode = prefs.getString(p + "screenshotMode", null);
+        d.customLocale = prefs.getString(p + "customLocale", "");
+        d.customModel = prefs.getString(p + "customModel", "");
+        d.rotationLock = prefs.getString(p + "rotationLock", null);
+        return d;
+    }
+
+    private void saveAppOptions(String pkg, Cloner.Options o) {
+        if (pkg == null || pkg.isEmpty() || o == null) return;
+        String p = "app:" + pkg + ":";
+        prefs.edit()
+                .putBoolean(p + "saved", true)
+                .putBoolean(p + "sameLength", o.sameLength)
+                .putBoolean(p + "tintIcon", o.tintIcon)
+                .putBoolean(p + "badgeIcon", o.badgeIcon)
+                .putBoolean(p + "multiColor", o.multiColor)
+                .putBoolean(p + "flipIcon", o.flipIcon)
+                .putInt(p + "rotateIcon", o.rotateIcon)
+                .putString(p + "badgeText", o.badgeText != null ? o.badgeText : "")
+                .putString(p + "customVersionName", o.customVersionName != null ? o.customVersionName : "")
+                .putBoolean(p + "patchDex", o.patchDex)
+                .putBoolean(p + "renameClasses", o.renameClasses)
+                .putBoolean(p + "spoofSignature", o.spoofSignature)
+                .putBoolean(p + "spoofAndroidId", o.spoofAndroidId)
+                .putBoolean(p + "keepDeviceAbiOnly", o.keepDeviceAbiOnly)
+                .putBoolean(p + "compressNativeLibs", o.compressNativeLibs)
+                .putBoolean(p + "stripSharedUid", o.stripSharedUid)
+                .putInt(p + "minTargetSdk", o.minTargetSdk)
+                .putBoolean(p + "standalone", o.standalone)
+                .putBoolean(p + "noAutostart", o.noAutostart)
+                .putBoolean(p + "noWidgets", o.noWidgets)
+                .putBoolean(p + "noAppDefaults", o.noAppDefaults)
+                .putBoolean(p + "noWearable", o.noWearable)
+                .putBoolean(p + "noCrashReporters", o.noCrashReporters)
+                .putBoolean(p + "excludeRecents", o.excludeRecents)
+                .putBoolean(p + "noBackup", o.noBackup)
+                .putBoolean(p + "debuggable", o.debuggable)
+                .putString(p + "screenshotMode", o.screenshotMode)
+                .putString(p + "customLocale", o.customLocale != null ? o.customLocale : "")
+                .putString(p + "customModel", o.customModel != null ? o.customModel : "")
+                .putString(p + "rotationLock", o.rotationLock)
+                .apply();
+    }
+
+    private void resetAppOptions(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return;
+        String prefix = "app:" + pkg + ":";
+        SharedPreferences.Editor ed = prefs.edit();
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(prefix)) ed.remove(k);
+        }
+        ed.apply();
+    }
+
     private void scanInstalled() {
         summaryView.setText(R.string.summary_loading);
         worker.execute(() -> {
@@ -312,6 +401,7 @@ public class MainActivity extends Activity {
                     cr.origPkg = origPkg != null ? origPkg : "(unknown)";
                     cr.cloneNum = cloneNum;
                     cr.sourceDir = ai.sourceDir;
+                    cr.splitDirs = ai.splitSourceDirs;
                     cr.label = String.valueOf(ai.loadLabel(pm));
                     cr.icon = ai.loadIcon(pm);
                     cr.hasSpoofSig = ai.metaData != null && ai.metaData.containsKey("io.openappcc.ORIGINAL_SIG");
@@ -503,25 +593,46 @@ public class MainActivity extends Activity {
         shotAdp.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spScreenshots.setAdapter(shotAdp);
 
-        Cloner.Options defs = defaultOptions();
-        swSameLength.setChecked(defs.sameLength);
-        swTintIcon.setChecked(defs.tintIcon);
-        swBadgeIcon.setChecked(defs.badgeIcon);
-        swMultiColor.setChecked(defs.multiColor);
-        swPatchDex.setChecked(defs.patchDex);
-        swRenameClasses.setChecked(defs.renameClasses);
-        swSpoofSig.setChecked(defs.spoofSignature);
-        swSpoofAndroidId.setChecked(defs.spoofAndroidId);
-        swKeepDeviceAbi.setChecked(defs.keepDeviceAbiOnly);
-        swCompressNative.setChecked(defs.compressNativeLibs);
-        swStandalone.setChecked(defs.standalone);
-        swNoAuto.setChecked(defs.noAutostart);
-        swNoCrash.setChecked(defs.noCrashReporters);
+        Cloner.Options initOpts = updateTarget != null
+                ? loadAppOptions(updateTarget.pkg, app.pkg)
+                : loadAppOptions(app.pkg, null);
+        java.util.function.Consumer<Cloner.Options> applyControls = (o) -> {
+            swSameLength.setChecked(o.sameLength);
+            swTintIcon.setChecked(o.tintIcon);
+            swBadgeIcon.setChecked(o.badgeIcon);
+            swMultiColor.setChecked(o.multiColor);
+            swFlipIcon.setChecked(o.flipIcon);
+            spRotateIcon.setSelection(Math.max(0, Math.min(3, (o.rotateIcon / 90) % 4)));
+            badgeTextEt.setText(o.badgeText != null ? o.badgeText : "");
+            versionNameEt.setText(o.customVersionName != null ? o.customVersionName : "");
+            swPatchDex.setChecked(o.patchDex);
+            swRenameClasses.setChecked(o.renameClasses);
+            swSpoofSig.setChecked(o.spoofSignature);
+            swSpoofAndroidId.setChecked(o.spoofAndroidId);
+            swKeepDeviceAbi.setChecked(o.keepDeviceAbiOnly);
+            swCompressNative.setChecked(o.compressNativeLibs);
+            swStripUid.setChecked(o.stripSharedUid);
+            spMinSdk.setSelection(o.minTargetSdk == 31 ? 1 : (o.minTargetSdk == 34 ? 2 : 0));
+            swStandalone.setChecked(o.standalone);
+            swNoAuto.setChecked(o.noAutostart);
+            swNoWid.setChecked(o.noWidgets);
+            swNoDef.setChecked(o.noAppDefaults);
+            swNoWear.setChecked(o.noWearable);
+            swNoCrash.setChecked(o.noCrashReporters);
+            swExRec.setChecked(o.excludeRecents);
+            swNoBack.setChecked(o.noBackup);
+            swDebug.setChecked(o.debuggable);
+            spScreenshots.setSelection("allow".equals(o.screenshotMode) ? 1 : ("block".equals(o.screenshotMode) ? 2 : 0));
+            customLocaleEt.setText(o.customLocale != null ? o.customLocale : "");
+            customModelEt.setText(o.customModel != null ? o.customModel : "");
+            spRotation.setSelection("portrait".equals(o.rotationLock) ? 1 : ("landscape".equals(o.rotationLock) ? 2 : 0));
+        };
+        applyControls.accept(initOpts);
         if (updateTarget != null) {
             rangeEt.setText(String.valueOf(updateTarget.cloneNum));
             labelEt.setText(updateTarget.label);
             customPkgEt.setText(updateTarget.pkg);
-            swSpoofSig.setChecked(updateTarget.hasSpoofSig);
+            if (updateTarget.hasSpoofSig) swSpoofSig.setChecked(true);
         }
 
         int nextFree = updateTarget != null ? updateTarget.cloneNum : Math.max(1, app.highestCloneNum + 1);
@@ -574,6 +685,10 @@ public class MainActivity extends Activity {
             chips[i].setOnClickListener(v -> {
                 for (int j = 0; j < chips.length; j++) styleChip(chips[j], j == idx);
                 rangeEt.setText(chipVals[idx]);
+                if (updateTarget != null && updateTarget.pkg.equals(customPkgEt.getText().toString().trim())
+                        && !String.valueOf(updateTarget.cloneNum).equals(chipVals[idx])) {
+                    customPkgEt.setText("");
+                }
                 refreshPreview.run();
             });
         }
@@ -595,14 +710,22 @@ public class MainActivity extends Activity {
             @Override public void onItemSelected(AdapterView<?> parent, View v, int pos, long id) { refreshPreview.run(); }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
+        view.findViewById(R.id.btnResetAppDefaults).setOnClickListener(v -> {
+            resetAppOptions(app.pkg);
+            if (updateTarget != null) resetAppOptions(updateTarget.pkg);
+            applyControls.accept(defaultOptions());
+            refreshPreview.run();
+            appsAdapter.notifyDataSetChanged();
+            Toast.makeText(this, "Reset settings for " + (updateTarget != null ? updateTarget.label : app.label) + " to defaults", Toast.LENGTH_SHORT).show();
+        });
         refreshPreview.run();
 
         AlertDialog dlg = new AlertDialog.Builder(this)
-                .setTitle(updateTarget != null ? "Update Clone #" + updateTarget.cloneNum : "Clone Studio")
+                .setTitle(updateTarget != null ? "Edit / Re-clone #" + updateTarget.cloneNum : "Clone Studio")
                 .setView(view)
                 .setNegativeButton("Cancel", null)
                 .setNeutralButton("Doctor", null)
-                .setPositiveButton(updateTarget != null ? "Update & Install" : "Clone & Install", null)
+                .setPositiveButton(updateTarget != null ? "Re-clone & Install" : "Clone & Install", null)
                 .create();
 
         dlg.setOnShowListener(d -> {
@@ -655,6 +778,9 @@ public class MainActivity extends Activity {
                 int rotSel = spRotation.getSelectedItemPosition();
                 opts.rotationLock = rotSel == 1 ? "portrait" : (rotSel == 2 ? "landscape" : null);
                 opts.customLabel = customLbl;
+                saveAppOptions(app.pkg, opts);
+                if (updateTarget != null) saveAppOptions(updateTarget.pkg, opts);
+                appsAdapter.notifyDataSetChanged();
                 boolean exportOnly = swExportOnly.isChecked();
                 dlg.dismiss();
                 runCloneTasks(Collections.singletonList(app), nums, opts, externalApk, "", exportOnly);
@@ -673,8 +799,7 @@ public class MainActivity extends Activity {
             return;
         }
         String rangeText = numbersInput.getText().toString();
-        Cloner.Options opts = defaultOptions();
-        runCloneTasks(chosen, null, opts, null, rangeText);
+        runCloneTasks(chosen, null, null, null, rangeText);
     }
 
     private void runCloneTasks(List<AppRow> apps, List<Integer> explicitNums, Cloner.Options template, File externalApk) {
@@ -715,7 +840,8 @@ public class MainActivity extends Activity {
 
                 for (int num : nums) {
                     try {
-                        Cloner.Options opts = copyOptions(template);
+                        Cloner.Options baseOpts = template != null ? template : loadAppOptions(app.pkg, null);
+                        Cloner.Options opts = copyOptions(baseOpts);
                         opts.cloneNumber = num;
                         if (opts.customLabel == null || opts.customLabel.isEmpty()) {
                             opts.customLabel = app.label + " " + num;
@@ -731,6 +857,7 @@ public class MainActivity extends Activity {
 
                         File outBase = new File(batchDir, "base.apk");
                         Cloner.Result res = Cloner.clone(this, srcBase, outBase, opts);
+                        saveAppOptions(res.newPackage, opts);
                         List<File> installFiles = new ArrayList<>();
                         installFiles.add(res.file);
 
@@ -1048,6 +1175,10 @@ public class MainActivity extends Activity {
                 if (st.length() > 0) st.append(" • ");
                 st.append("Cloned x").append(app.existingClones);
             }
+            if (hasAppOptions(app.pkg)) {
+                if (st.length() > 0) st.append(" • ");
+                st.append("Custom");
+            }
             if (st.length() == 0) st.append(app.isSystem ? "System app" : "User app");
             status.setText(st.toString());
 
@@ -1129,12 +1260,30 @@ public class MainActivity extends Activity {
                 if (matchedOrig != null) {
                     openCloneStudio(matchedOrig, null, cr);
                 } else {
-                    pendingUpdateClone = cr;
-                    Toast.makeText(MainActivity.this, "Original app not installed — pick updated APK", Toast.LENGTH_SHORT).show();
-                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                            .addCategory(Intent.CATEGORY_OPENABLE)
-                            .setType("*/*");
-                    startActivityForResult(i, REQ_PICK_UPDATE_APK);
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Edit / Re-clone " + cr.label)
+                            .setMessage("Original app (" + cr.origPkg + ") is not installed. Choose source APK:")
+                            .setPositiveButton("Re-clone Installed Clone", (d, w) -> {
+                                AppRow selfRow = new AppRow();
+                                selfRow.pkg = cr.origPkg != null && !"(unknown)".equals(cr.origPkg) ? cr.origPkg : cr.pkg;
+                                selfRow.label = cr.label;
+                                selfRow.sourceDir = cr.sourceDir;
+                                selfRow.splitDirs = cr.splitDirs;
+                                selfRow.versionName = cr.versionName;
+                                selfRow.versionCode = cr.versionCode;
+                                selfRow.icon = cr.icon;
+                                selfRow.highestCloneNum = cr.cloneNum;
+                                openCloneStudio(selfRow, null, cr);
+                            })
+                            .setNeutralButton("Pick APK File", (d, w) -> {
+                                pendingUpdateClone = cr;
+                                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                                        .addCategory(Intent.CATEGORY_OPENABLE)
+                                        .setType("*/*");
+                                startActivityForResult(i, REQ_PICK_UPDATE_APK);
+                            })
+                            .setNegativeButton("Cancel", null)
+                            .show();
                 }
             });
             row.findViewById(R.id.btnDoctorClone).setOnClickListener(v ->

@@ -762,13 +762,26 @@ public final class Cloner {
         return null;
     }
 
+    static boolean hasBootstrapProvider(Axml ax) {
+        for (Axml.Node n : ax.nodes) {
+            if (n.kind == Axml.START && "provider".equals(n.name)) {
+                Axml.Attr nm = Axml.attr(n, "name");
+                if (nm != null && "io.openappcc.hook.BootstrapProvider".equals(nm.raw)) return true;
+            }
+        }
+        return false;
+    }
+
     static void injectBootstrapProvider(Axml ax, String newPackage) {
         int appEnd = -1;
         for (int i = 0; i < ax.nodes.size(); i++) {
             Axml.Node n = ax.nodes.get(i);
             if (n.kind == Axml.START && "provider".equals(n.name)) {
                 Axml.Attr nm = Axml.attr(n, "name");
-                if (nm != null && "io.openappcc.hook.BootstrapProvider".equals(nm.raw)) return;
+                if (nm != null && "io.openappcc.hook.BootstrapProvider".equals(nm.raw)) {
+                    Axml.setAttr(n, "authorities", newPackage + ".openappcc.bootstrap");
+                    return;
+                }
             }
             if (n.kind == Axml.END && "application".equals(n.name)) {
                 appEnd = i;
@@ -846,9 +859,13 @@ public final class Cloner {
             if (pkgAttr == null || pkgAttr.raw == null) throw new IllegalStateException("manifest has no package");
 
             String oldPackage = pkgAttr.raw;
+            Axml.Node prevOrigMeta = findMetaNode(ax, "io.openappcc.ORIGINAL");
+            Axml.Attr prevOrigVal = prevOrigMeta != null ? Axml.attr(prevOrigMeta, "value") : null;
+            String baseOrigPackage = (prevOrigVal != null && prevOrigVal.raw != null && !prevOrigVal.raw.isEmpty())
+                    ? prevOrigVal.raw : oldPackage;
             String newPackage = opts.overridePackage != null && !opts.overridePackage.isEmpty()
                     ? opts.overridePackage
-                    : generatePackage(oldPackage, opts.cloneNumber, opts.sameLength);
+                    : generatePackage(baseOrigPackage, opts.cloneNumber, opts.sameLength);
             result.oldPackage = oldPackage;
             result.newPackage = newPackage;
 
@@ -867,12 +884,24 @@ public final class Cloner {
             if (opts.stripSharedUid) stripSharedUid(ax);
 
             boolean hookReady = false;
+            boolean alreadyHadBootstrap = findMetaNode(ax, "io.openappcc.ORIGINAL_SIG") != null
+                    || hasBootstrapProvider(ax);
             if (!opts.isSplit) {
                 forceRebase(ax, newPackage, result.warnings, result.forcedPairs);
-                stampClone(ax, opts.cloneNumber, oldPackage);
+                stampClone(ax, opts.cloneNumber, baseOrigPackage);
+                Axml.Node prevSig = findMetaNode(ax, "io.openappcc.ORIGINAL_SIG");
+                Axml.Attr prevSigVal = prevSig != null ? Axml.attr(prevSig, "value") : null;
+                String savedOrigSig = (prevSigVal != null && prevSigVal.raw != null && !prevSigVal.raw.isEmpty())
+                        ? prevSigVal.raw : null;
+                for (String hk : new String[]{
+                        "io.openappcc.ORIGINAL_SIG", "io.openappcc.ANDROID_ID",
+                        "io.openappcc.SCREENSHOTS", "io.openappcc.LOCALE", "io.openappcc.BUILD_MODEL"}) {
+                    Axml.Node hn = findMetaNode(ax, hk);
+                    if (hn != null) Axml.setAttr(hn, "value", "");
+                }
                 if (needsBootstrapHook(opts) && opts.hookDex != null) {
                     if (opts.spoofSignature) {
-                        String sigB64 = extractOriginalCertBase64(srcApk);
+                        String sigB64 = savedOrigSig != null ? savedOrigSig : extractOriginalCertBase64(srcApk);
                         if (sigB64 != null) {
                             upsertMetaStr(ax, "io.openappcc.ORIGINAL_SIG", sigB64);
                             hookReady = true;
@@ -976,7 +1005,7 @@ public final class Cloner {
 
             byte[] copyBuf = new byte[65536];
             int maxDexIdx = 0;
-            boolean injectHook = hookReady;
+            boolean injectHook = hookReady && !alreadyHadBootstrap;
             String targetAbi = opts.keepAbi;
             if ((targetAbi == null || targetAbi.isEmpty()) && opts.keepDeviceAbiOnly) {
                 String[] abis = android.os.Build.SUPPORTED_ABIS;

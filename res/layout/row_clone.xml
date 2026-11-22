@@ -102,10 +102,10 @@
             android:layout_width="0dp"
             android:layout_height="34dp"
             android:layout_marginEnd="6dp"
-            android:layout_weight="1"
+            android:layout_weight="1.2"
             android:background="@drawable/bg_btn_primary"
             android:gravity="center"
-            android:text="Update"
+            android:text="Edit / Re-clone"
             android:textColor="@android:color/white"
             android:textSize="12sp"
             android:textStyle="bold" />
