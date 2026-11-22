@@ -1,0 +1,152 @@
+name: Build & Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Prepare clone keystore (bundled in assets) & separate hidden release keystore
+        env:
+          CLONE_KS_B64: ${{ secrets.OPENAPPCC_KEYSTORE_B64 }}
+          RELEASE_KS_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          RELEASE_ALIAS: ${{ secrets.RELEASE_KS_ALIAS }}
+          RELEASE_PASS: ${{ secrets.RELEASE_KS_PASS }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+
+          # 1. On-device clone-signing key (bundled in assets/openappcc.p12; alias/pass match Cloner.java)
+          if [ -n "${CLONE_KS_B64}" ]; then
+            printf '%s' "${CLONE_KS_B64}" | base64 -d > assets/openappcc.p12
+          else
+            keytool -genkeypair -keystore assets/openappcc.p12 -storetype PKCS12 \
+              -storepass openappcc -alias openappcc -keypass openappcc \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=openappcc-clone,O=openappcc,C=US" >/dev/null
+          fi
+
+          # 2. Separate APK release signing key (NEVER bundled in assets/, kept outside repo)
+          REL_ALIAS="${RELEASE_ALIAS:-release}"
+          REL_PASS="${RELEASE_PASS:-$(openssl rand -hex 16)}"
+          if [ -n "${RELEASE_KS_B64}" ]; then
+            printf '%s' "${RELEASE_KS_B64}" | base64 -d > /tmp/release.p12
+            echo "::notice::Using hidden release signing key from GitHub Secrets."
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "::error::RELEASE_KEYSTORE_B64 secret is required for tagged releases."
+            exit 1
+          else
+            echo "::warning::RELEASE_KEYSTORE_B64 not set; generating ephemeral release signing key."
+            keytool -genkeypair -keystore /tmp/release.p12 -storetype PKCS12 \
+              -storepass "${REL_PASS}" -alias "${REL_ALIAS}" -keypass "${REL_PASS}" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=openappcc-release,O=openappcc,C=US" >/dev/null
+          fi
+          echo "::add-mask::${REL_PASS}"
+          echo "REL_ALIAS=${REL_ALIAS}" >> "$GITHUB_ENV"
+          echo "REL_PASS=${REL_PASS}" >> "$GITHUB_ENV"
+
+      - name: Compile & Sign Release APK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BT_DIR="$(ls -d "${SDK}"/build-tools/* | sort -V | tail -n 1)"
+          ANDROID_JAR="$(ls "${SDK}"/platforms/android-*/android.jar | sort -V | tail -n 1)"
+          APKSIGNER_JAR="${BT_DIR}/lib/apksigner.jar"
+
+          rm -rf build
+          mkdir -p build/{gen,classes,dex,hook-classes,hook-dex}
+
+          # 1. Build hook.dex
+          if [ -f hook/io/openappcc/hook/BootstrapProvider.java ]; then
+            javac --release 11 -nowarn -encoding UTF-8 -cp "${ANDROID_JAR}" \
+              -d build/hook-classes hook/io/openappcc/hook/BootstrapProvider.java
+            jar --create --file build/hook.jar -C build/hook-classes .
+            "${BT_DIR}/d8" --lib "${ANDROID_JAR}" --min-api 24 --output build/hook-dex build/hook.jar
+            cp build/hook-dex/classes.dex assets/hook.dex
+          fi
+
+          # 2. Resources & manifest
+          "${BT_DIR}/aapt2" compile --dir res -o build/res.zip
+          "${BT_DIR}/aapt2" link -o build/base.apk -I "${ANDROID_JAR}" \
+            --manifest AndroidManifest.xml --java build/gen build/res.zip \
+            -A assets --auto-add-overlay
+
+          # 3. Java -> DEX
+          find src build/gen -name '*.java' > build/javac_sources.txt
+          javac --release 11 -nowarn -encoding UTF-8 \
+            -cp "${ANDROID_JAR}:${APKSIGNER_JAR}" -d build/classes @build/javac_sources.txt
+          jar --create --file build/app.jar -C build/classes .
+          "${BT_DIR}/d8" --lib "${ANDROID_JAR}" --min-api 29 --output build/dex build/app.jar "${APKSIGNER_JAR}"
+
+          # 4. Package & 16KB align
+          DEX_ARGS=()
+          for df in build/dex/classes*.dex; do
+            DEX_ARGS+=(-C build/dex "$(basename "$df")")
+          done
+          jar --update --file build/base.apk "${DEX_ARGS[@]}"
+          "${BT_DIR}/zipalign" -f -P 16 4 build/base.apk build/aligned.apk || \
+            "${BT_DIR}/zipalign" -f -p 4 build/base.apk build/aligned.apk
+
+          # 5. Sign APK with the separate hidden release key
+          "${BT_DIR}/apksigner" sign \
+            --ks /tmp/release.p12 \
+            --ks-key-alias "${REL_ALIAS}" \
+            --ks-pass "pass:${REL_PASS}" \
+            --key-pass "pass:${REL_PASS}" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out openappcc-release.apk \
+            build/aligned.apk
+          "${BT_DIR}/apksigner" verify --verbose openappcc-release.apk
+
+          # Remove keystores immediately
+          rm -f /tmp/release.p12 assets/openappcc.p12
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openappcc-release-apk
+          path: openappcc-release.apk
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # Remove all prior GitHub Releases before publishing the fresh release
+          for old_tag in $(gh release list --limit 50 --json tagName -q '.[].tagName'); do
+            if [ "${old_tag}" = "${TAG}" ]; then
+              gh release delete "${old_tag}" --yes || true
+            else
+              gh release delete "${old_tag}" --cleanup-tag --yes || gh release delete "${old_tag}" --yes || true
+            fi
+          done
+          PRERELEASE_FLAG=()
+          if [[ "${TAG}" == *-rc* ]]; then
+            PRERELEASE_FLAG=(--prerelease)
+          fi
+          gh release create "${TAG}" openappcc-release.apk \
+            --title "${TAG}" \
+            --generate-notes \
+            "${PRERELEASE_FLAG[@]}"

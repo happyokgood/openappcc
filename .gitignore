@@ -1,0 +1,37 @@
+# Docs / Markdown (keep root README.md)
+*.md
+!README.md
+
+# Keys, keystores, certificates, and secrets
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+*.key
+*.pk8
+*.crt
+*.cer
+*.der
+.env
+.env.*
+local.properties
+google-services.json
+secrets.*
+
+# Build outputs and binaries
+build/
+*.apk
+*.idsig
+*.aab
+*.dex
+*.jar
+*.class
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
