@@ -123,7 +123,9 @@ public final class BootstrapProvider extends ContentProvider {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             String name = method.getName();
             boolean isPkgInfo = "getPackageInfo".equals(name) || "getPackageInfoVersioned".equals(name);
-            if (isPkgInfo && args != null && args.length > 0 && args[0] instanceof String) {
+            boolean isAppInfo = "getApplicationInfo".equals(name);
+            boolean isInstaller = "getInstallerPackageName".equals(name) || "getInstallSourceInfo".equals(name);
+            if ((isPkgInfo || isAppInfo || isInstaller) && args != null && args.length > 0 && args[0] instanceof String) {
                 String req = (String) args[0];
                 if (origPkg != null && origPkg.equals(req)) {
                     args[0] = clonedPkg;
@@ -132,8 +134,14 @@ public final class BootstrapProvider extends ContentProvider {
             Object res = method.invoke(real, args);
             if (isPkgInfo && res instanceof PackageInfo) {
                 PackageInfo pi = (PackageInfo) res;
-                if (clonedPkg.equals(pi.packageName)) {
+                if (clonedPkg.equals(pi.packageName) || (origPkg != null && origPkg.equals(pi.packageName))) {
                     patchSignatures(pi, fakeSigs);
+                }
+            } else if ("checkSignatures".equals(name) && args != null && args.length >= 2) {
+                Object a0 = args[0], a1 = args[1];
+                if (clonedPkg.equals(a0) || clonedPkg.equals(a1)
+                        || (origPkg != null && (origPkg.equals(a0) || origPkg.equals(a1)))) {
+                    return PackageManager.SIGNATURE_MATCH;
                 }
             }
             return res;
@@ -151,9 +159,22 @@ public final class BootstrapProvider extends ContentProvider {
                 detailsField.setAccessible(true);
                 Object details = detailsField.get(pi.signingInfo);
                 if (details != null) {
-                    Field sigsField = details.getClass().getDeclaredField("signatures");
-                    sigsField.setAccessible(true);
-                    sigsField.set(details, fakeSigs);
+                    for (String fn : new String[]{"signatures", "mSignatures"}) {
+                        try {
+                            Field f = details.getClass().getDeclaredField(fn);
+                            f.setAccessible(true);
+                            f.set(details, fakeSigs);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    for (String fn : new String[]{"pastSigningCertificates", "mPastSigningCertificates"}) {
+                        try {
+                            Field f = details.getClass().getDeclaredField(fn);
+                            f.setAccessible(true);
+                            f.set(details, null);
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
             } catch (Throwable ignored) {
             }

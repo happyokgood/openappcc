@@ -249,7 +249,7 @@ public class MainActivity extends Activity {
         bindPrefSwitch(R.id.defMultiColor, "multiColor", true);
         bindPrefSwitch(R.id.defPatchDex, "patchDex", true);
         bindPrefSwitch(R.id.defRenameClasses, "renameClasses", false);
-        bindPrefSwitch(R.id.defSpoofSig, "spoofSignature", false);
+        bindPrefSwitch(R.id.defSpoofSig, "spoofSignature", true);
         bindPrefSwitch(R.id.defSpoofAndroidId, "spoofAndroidId", false);
         bindPrefSwitch(R.id.defKeepDeviceAbi, "keepDeviceAbiOnly", false);
         bindPrefSwitch(R.id.defCompressNative, "compressNativeLibs", false);
@@ -278,7 +278,7 @@ public class MainActivity extends Activity {
         o.multiColor = prefs.getBoolean("multiColor", true);
         o.patchDex = prefs.getBoolean("patchDex", true);
         o.renameClasses = prefs.getBoolean("renameClasses", false);
-        o.spoofSignature = prefs.getBoolean("spoofSignature", false);
+        o.spoofSignature = prefs.getBoolean("spoofSignature", true);
         o.spoofAndroidId = prefs.getBoolean("spoofAndroidId", false);
         o.keepDeviceAbiOnly = prefs.getBoolean("keepDeviceAbiOnly", false);
         o.compressNativeLibs = prefs.getBoolean("compressNativeLibs", false);
@@ -871,8 +871,11 @@ public class MainActivity extends Activity {
                                 spOpts.customLabel = null;
                                 spOpts.customVersionName = null;
                                 spOpts.overridePackage = res.newPackage;
-                                File outSp = new File(batchDir, "split" + spIdx + ".apk");
-                                Cloner.Result spRes = Cloner.clone(this, new File(spPath), outSp, spOpts);
+                                File spSrc = new File(spPath);
+                                String spName = spSrc.getName().endsWith(".apk") && !"base.apk".equals(spSrc.getName())
+                                        ? spSrc.getName() : ("split" + spIdx + ".apk");
+                                File outSp = new File(batchDir, spName);
+                                Cloner.Result spRes = Cloner.clone(this, spSrc, outSp, spOpts);
                                 installFiles.add(spRes.file);
                             }
                         }
@@ -1000,7 +1003,7 @@ public class MainActivity extends Activity {
                 byte[] buf = new byte[65536];
                 for (File f : files) {
                     n++;
-                    String name = n == 1 ? "base.apk" : "split" + n + ".apk";
+                    String name = n == 1 ? "base.apk" : (f.getName().endsWith(".apk") ? f.getName() : ("split" + n + ".apk"));
                     OutputStream out = session.openWrite(name, 0, f.length());
                     FileInputStream in = new FileInputStream(f);
                     try {
@@ -1107,6 +1110,9 @@ public class MainActivity extends Activity {
                     File bundleDir = new File(getCacheDir(), "picked_bundle_" + stamp);
                     File[] unpacked = Cloner.unpackApkOrBundle(picked, bundleDir);
                     File baseApk = unpacked[0];
+                    if (unpacked.length > 1 || !baseApk.equals(picked)) {
+                        if (!picked.delete()) picked.deleteOnExit();
+                    }
                     String pkg = Cloner.packageOf(baseApk);
                     PackageInfo pi = getPackageManager().getPackageArchiveInfo(baseApk.getAbsolutePath(), 0);
                     AppRow extRow = new AppRow();

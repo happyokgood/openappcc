@@ -116,6 +116,28 @@ public final class Dex {
         return b;
     }
 
+    public static void collectTypeClasses(byte[] src, Set<String> outClasses) {
+        if (src == null || src.length < 0x70 || src[0] != 'd' || src[1] != 'e' || src[2] != 'x') return;
+        int count = u32(src, 0x38);
+        int idsOff = u32(src, 0x3c);
+        int typeCount = u32(src, 0x40);
+        int typeOff = u32(src, 0x44);
+        for (int t = 0; t < typeCount; t++) {
+            int tp = typeOff + t * 4;
+            if (tp + 4 > src.length) break;
+            int sIdx = u32(src, tp);
+            if (sIdx < 0 || sIdx >= count) continue;
+            int at = u32(src, idsOff + sIdx * 4);
+            if (at <= 0 || at >= src.length) continue;
+            String desc = readString(src, at);
+            if (desc.length() > 2 && desc.charAt(0) == 'L' && desc.charAt(desc.length() - 1) == ';') {
+                String cls = desc.substring(1, desc.length() - 1).replace('/', '.');
+                outClasses.add(cls);
+                if (cls.indexOf('$') >= 0) outClasses.add(cls.replace('$', '.'));
+            }
+        }
+    }
+
     public static Result patch(byte[] src, String oldPkg, String newPkg, List<String[]> forced) {
         return patch(src, oldPkg, newPkg, forced, false, null, null);
     }
@@ -133,8 +155,6 @@ public final class Dex {
         byte[] out = src.clone();
         int count = u32(out, 0x38);
         int idsOff = u32(out, 0x3c);
-        int typeCount = u32(out, 0x40);
-        int typeOff = u32(out, 0x44);
         boolean changed = false;
         boolean doDesc = renameClasses && oldPkg.length() == newPkg.length() && !oldPkg.equals(newPkg);
         String oldSlash = doDesc ? oldPkg.replace('.', '/') : null;
@@ -145,18 +165,7 @@ public final class Dex {
         if (!doDesc) {
             skipClasses = new HashSet<>();
             if (protectedClasses != null) skipClasses.addAll(protectedClasses);
-            for (int t = 0; t < typeCount; t++) {
-                int tp = typeOff + t * 4;
-                if (tp + 4 > out.length) break;
-                int sIdx = u32(out, tp);
-                if (sIdx < 0 || sIdx >= count) continue;
-                int at = u32(out, idsOff + sIdx * 4);
-                if (at <= 0 || at >= out.length) continue;
-                String desc = readString(out, at);
-                if (desc.length() > 2 && desc.charAt(0) == 'L' && desc.charAt(desc.length() - 1) == ';') {
-                    skipClasses.add(desc.substring(1, desc.length() - 1).replace('/', '.'));
-                }
-            }
+            collectTypeClasses(out, skipClasses);
             if (authorityNames != null) skipClasses.removeAll(authorityNames);
         }
 
@@ -164,7 +173,7 @@ public final class Dex {
             int at = u32(out, idsOff + i * 4);
             if (at <= 0 || at >= out.length) continue;
             String s = readString(out, at);
-            if (s.isEmpty() || (!doDesc && !s.contains("://") && (isCodeShape(s) || (skipClasses != null && skipClasses.contains(s))))) {
+            if (s.isEmpty() || (!doDesc && !s.contains("://") && (isCodeShape(s) || isProtectedClass(s, skipClasses, authorityNames)))) {
                 if (doDesc) prevBytes = mutf8(s);
                 continue;
             }
@@ -216,6 +225,23 @@ public final class Dex {
 
         if (changed) r.bytes = reseal(out);
         return r;
+    }
+
+    private static boolean isProtectedClass(String s, Set<String> skipClasses, Set<String> authorityNames) {
+        if (authorityNames != null && authorityNames.contains(s)) return false;
+        if (skipClasses == null || skipClasses.isEmpty()) return false;
+        if (skipClasses.contains(s)) return true;
+        int dot = s.lastIndexOf('.');
+        while (dot > 0) {
+            if (skipClasses.contains(s.substring(0, dot))) {
+                String tail = s.substring(dot + 1);
+                if (!tail.isEmpty() && Character.isUpperCase(tail.charAt(0)) && !tail.equals(tail.toUpperCase())) {
+                    return true;
+                }
+            }
+            dot = s.lastIndexOf('.', dot - 1);
+        }
+        return false;
     }
 
     private static int compareUnsigned(byte[] a, byte[] b) {

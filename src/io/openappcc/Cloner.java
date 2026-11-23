@@ -58,7 +58,7 @@ public final class Cloner {
         public String customVersionName;
         public boolean patchDex = true;
         public boolean renameClasses = false;
-        public boolean spoofSignature = false;
+        public boolean spoofSignature = true;
         public boolean spoofAndroidId = false;
         public String screenshotMode; // null, "allow", "block"
         public String customLocale;
@@ -952,6 +952,24 @@ public final class Cloner {
     }
 
     static String extractOriginalCertBase64(File srcApk) {
+        try (ZipFile zf = new ZipFile(srcApk)) {
+            Enumeration<? extends ZipEntry> entries = zf.entries();
+            java.security.cert.CertificateFactory cf = java.security.cert.CertificateFactory.getInstance("X.509");
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                String low = e.getName().toLowerCase(Locale.US);
+                if (low.startsWith("meta-inf/") && (low.endsWith(".rsa") || low.endsWith(".dsa") || low.endsWith(".ec"))) {
+                    try (InputStream in = zf.getInputStream(e)) {
+                        java.util.Collection<? extends Certificate> certs = cf.generateCertificates(in);
+                        if (certs != null && !certs.isEmpty()) {
+                            return java.util.Base64.getEncoder().encodeToString(certs.iterator().next().getEncoded());
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         try {
             com.android.apksig.ApkVerifier.Result vr = new com.android.apksig.ApkVerifier.Builder(srcApk).build().verify();
             List<X509Certificate> certs = vr.getSignerCertificates();
@@ -1084,6 +1102,18 @@ public final class Cloner {
             Set<String> protectedClasses = new HashSet<>();
             Set<String> authorityNames = new HashSet<>();
             collectManifestClassesAndAuthorities(ax, protectedClasses, authorityNames);
+            if (opts.patchDex && !opts.renameClasses) {
+                Enumeration<? extends ZipEntry> dexScan = zip.entries();
+                while (dexScan.hasMoreElements()) {
+                    ZipEntry de = dexScan.nextElement();
+                    if (de.getName().matches("classes\\d*\\.dex")) {
+                        try (InputStream din = zip.getInputStream(de)) {
+                            Dex.collectTypeClasses(readAll(din), protectedClasses);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
             protectedClasses.removeAll(authorityNames);
             result.renamedAttributes = renameIdentity(ax, oldPackage, newPackage);
             if (opts.stripSharedUid) stripSharedUid(ax);
@@ -1182,6 +1212,17 @@ public final class Cloner {
                     if (opts.debuggable) Axml.setBool(app, "debuggable", true);
                     if (opts.noBackup) Axml.setBool(app, "allowBackup", false);
                     if (opts.compressNativeLibs) Axml.setBool(app, "extractNativeLibs", true);
+                }
+                for (Axml.Node n : ax.nodes) {
+                    if (n.kind == Axml.START && "meta-data".equals(n.name)) {
+                        Axml.Attr na = Axml.attr(n, "name");
+                        if (na != null && na.raw != null && na.raw.startsWith("io.openappcc.")) continue;
+                        Axml.Attr va = Axml.attr(n, "value");
+                        if (va != null && va.type == 0x03 && oldPackage.equals(va.raw)) {
+                            va.raw = newPackage;
+                            va.data = 0;
+                        }
+                    }
                 }
                 if (opts.noAppDefaults) disableAppDefaults(ax);
                 if (opts.noWearable) disableWearable(ax);
