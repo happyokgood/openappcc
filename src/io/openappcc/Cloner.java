@@ -421,6 +421,56 @@ public final class Cloner {
         return false;
     }
 
+    static void collectManifestClassesAndAuthorities(Axml ax, Set<String> outClasses, Set<String> outAuthorities) {
+        int queriesDepth = 0;
+        for (Axml.Node n : ax.nodes) {
+            if (n.kind == Axml.START) {
+                if ("queries".equals(n.name)) {
+                    queriesDepth++;
+                    continue;
+                }
+                if (queriesDepth > 0 || n.name == null) continue;
+            } else if (n.kind == Axml.END) {
+                if ("queries".equals(n.name) && queriesDepth > 0) queriesDepth--;
+                continue;
+            } else {
+                continue;
+            }
+            String allowed = null;
+            switch (n.name) {
+                case "application":
+                    allowed = ",name,backupAgent,manageSpaceActivity,settingsActivity,zygotePreloadName,appComponentFactory,backupService,";
+                    break;
+                case "activity":
+                case "activity-alias":
+                    allowed = ",name,parentActivityName,targetActivity,";
+                    break;
+                case "service":
+                case "receiver":
+                case "provider":
+                case "instrumentation":
+                    allowed = ",name,";
+                    break;
+            }
+            if (allowed != null) {
+                for (Axml.Attr a : n.attrs) {
+                    if (a.type == 0x03 && a.raw != null && allowed.contains("," + a.name + ",")) {
+                        outClasses.add(a.raw);
+                    }
+                }
+            }
+            if ("provider".equals(n.name)) {
+                for (Axml.Attr a : n.attrs) {
+                    if (a.type == 0x03 && a.raw != null && "authorities".equals(a.name)) {
+                        for (String part : a.raw.split(";", -1)) {
+                            if (!part.isEmpty()) outAuthorities.add(part);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     static byte[] patchResXml(byte[] raw, String oldPkg, String newPkg, boolean renameClasses) {
         if (raw == null || raw.length < 8 || oldPkg.equals(newPkg)) return raw;
         if (raw[0] != 0x03 || raw[1] != 0x00 || raw[2] != 0x08 || raw[3] != 0x00) return raw;
@@ -436,11 +486,20 @@ public final class Cloner {
             String vndNew = "vnd." + newPkg + ".";
             for (Axml.Node n : ax.nodes) {
                 if (n.kind != Axml.START) continue;
+                String tag = n.name == null ? "" : n.name;
                 for (Axml.Attr a : n.attrs) {
                     if (a.type != 0x03 || a.raw == null) continue;
-                    if (!doClasses && ("targetClass".equals(a.name) || "fragment".equals(a.name)
-                            || "settingsActivity".equals(a.name) || "configure".equals(a.name))) {
-                        continue;
+                    String aname = a.name == null ? "" : a.name;
+                    if (!doClasses) {
+                        if ("targetClass".equals(aname) || "fragment".equals(aname)
+                                || "settingsActivity".equals(aname) || "configure".equals(aname)) {
+                            continue;
+                        }
+                        boolean isIdAttr = "accountType".equals(aname) || "contentAuthority".equals(aname)
+                                || "targetPackage".equals(aname) || "action".equals(aname)
+                                || "mimeType".equals(aname) || "authority".equals(aname)
+                                || ("name".equals(aname) && ("action".equals(tag) || "category".equals(tag)));
+                        if (!isIdAttr) continue;
                     }
                     String val = a.raw;
                     String nxt = val;
@@ -1022,6 +1081,10 @@ public final class Cloner {
             result.absolutizedClassNames = absolutizeClassNames(ax, oldPackage);
             if (opts.renameClasses) renameManifestClasses(ax, oldPackage, newPackage);
             resolveAuthorityRefs(ax, arscBytes);
+            Set<String> protectedClasses = new HashSet<>();
+            Set<String> authorityNames = new HashSet<>();
+            collectManifestClassesAndAuthorities(ax, protectedClasses, authorityNames);
+            protectedClasses.removeAll(authorityNames);
             result.renamedAttributes = renameIdentity(ax, oldPackage, newPackage);
             if (opts.stripSharedUid) stripSharedUid(ax);
 
@@ -1165,6 +1228,8 @@ public final class Cloner {
                 }
             }
             String keepAbiPrefix = filterAbi ? "lib/" + targetAbi + "/" : null;
+            Map<String, String> dexFileSha1 = new LinkedHashMap<>();
+            byte[] deferredDexMetaRaw = null;
             Enumeration<? extends ZipEntry> it = zip.entries();
             while (it.hasMoreElements()) {
                 ZipEntry e = it.nextElement();
@@ -1175,6 +1240,12 @@ public final class Cloner {
                     continue;
                 }
                 if (keepAbiPrefix != null && name.startsWith("lib/") && !name.startsWith(keepAbiPrefix)) {
+                    continue;
+                }
+                if (opts.patchDex && "assets/secondary-program-dex-jars/metadata.txt".equals(name)) {
+                    try (InputStream in = zip.getInputStream(e)) {
+                        deferredDexMetaRaw = readAll(in);
+                    }
                     continue;
                 }
                 if (name.matches("classes\\d*\\.dex")) {
@@ -1201,10 +1272,18 @@ public final class Cloner {
                     try (InputStream in = zip.getInputStream(e)) {
                         data = readAll(in);
                     }
-                    Dex.Result dr = Dex.patch(data, oldPackage, newPackage, result.forcedPairs, opts.renameClasses);
+                    Dex.Result dr = Dex.patch(data, oldPackage, newPackage, result.forcedPairs,
+                            opts.renameClasses, protectedClasses, authorityNames);
                     data = dr.bytes;
                     result.dexStringsPatched += dr.replaced;
                     result.dexStringsSkipped += dr.skipped;
+                    if (zip.getEntry("assets/secondary-program-dex-jars/metadata.txt") != null) {
+                        java.security.MessageDigest sha1 = java.security.MessageDigest.getInstance("SHA-1");
+                        byte[] dg = sha1.digest(data);
+                        StringBuilder hex = new StringBuilder(40);
+                        for (byte b : dg) hex.append(String.format(Locale.US, "%02x", b & 0xff));
+                        dexFileSha1.put(name, hex.toString());
+                    }
                 } else if (isResXml) {
                     try (InputStream in = zip.getInputStream(e)) {
                         data = patchResXml(readAll(in), oldPackage, newPackage, opts.renameClasses);
@@ -1259,6 +1338,29 @@ public final class Cloner {
                 }
                 out.closeEntry();
             }
+            if (deferredDexMetaRaw != null) {
+                String metaText = new String(deferredDexMetaRaw, StandardCharsets.UTF_8);
+                StringBuilder updatedMeta = new StringBuilder(metaText.length());
+                for (String line : metaText.split("\n", -1)) {
+                    String trimmed = line.trim();
+                    String[] parts = trimmed.isEmpty() ? new String[0] : trimmed.split("\\s+");
+                    if (parts.length >= 3 && dexFileSha1.containsKey(parts[0])) {
+                        boolean cr = line.endsWith("\r");
+                        updatedMeta.append(parts[0]).append(' ').append(dexFileSha1.get(parts[0]));
+                        for (int k = 2; k < parts.length; k++) updatedMeta.append(' ').append(parts[k]);
+                        if (cr) updatedMeta.append('\r');
+                    } else {
+                        updatedMeta.append(line);
+                    }
+                    updatedMeta.append('\n');
+                }
+                if (!metaText.endsWith("\n") && updatedMeta.length() > 0) {
+                    updatedMeta.setLength(updatedMeta.length() - 1);
+                }
+                out.putNextEntry(new ZipEntry("assets/secondary-program-dex-jars/metadata.txt"));
+                out.write(updatedMeta.toString().getBytes(StandardCharsets.UTF_8));
+                out.closeEntry();
+            }
             if (injectHook) {
                 String hookName = "classes" + (maxDexIdx + 1) + ".dex";
                 Result.stage = "zip " + hookName;
@@ -1271,6 +1373,9 @@ public final class Cloner {
             out.close();
             zip.close();
             zip = null;
+            arscBytes = null;
+            newManifest = null;
+            iconPatches.clear();
 
             Result.stage = "sign";
             com.android.apksig.ApkSigner.SignerConfig signerConfig =

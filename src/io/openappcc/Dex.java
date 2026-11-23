@@ -3,7 +3,9 @@ package io.openappcc;
 import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.zip.Adler32;
 
 /**
@@ -115,10 +117,15 @@ public final class Dex {
     }
 
     public static Result patch(byte[] src, String oldPkg, String newPkg, List<String[]> forced) {
-        return patch(src, oldPkg, newPkg, forced, false);
+        return patch(src, oldPkg, newPkg, forced, false, null, null);
     }
 
     public static Result patch(byte[] src, String oldPkg, String newPkg, List<String[]> forced, boolean renameClasses) {
+        return patch(src, oldPkg, newPkg, forced, renameClasses, null, null);
+    }
+
+    public static Result patch(byte[] src, String oldPkg, String newPkg, List<String[]> forced,
+                               boolean renameClasses, Set<String> protectedClasses, Set<String> authorityNames) {
         Result r = new Result();
         r.bytes = src;
         if (src.length < 0x70 || src[0] != 'd' || src[1] != 'e' || src[2] != 'x') return r;
@@ -126,17 +133,38 @@ public final class Dex {
         byte[] out = src.clone();
         int count = u32(out, 0x38);
         int idsOff = u32(out, 0x3c);
+        int typeCount = u32(out, 0x40);
+        int typeOff = u32(out, 0x44);
         boolean changed = false;
         boolean doDesc = renameClasses && oldPkg.length() == newPkg.length() && !oldPkg.equals(newPkg);
         String oldSlash = doDesc ? oldPkg.replace('.', '/') : null;
         String newSlash = doDesc ? newPkg.replace('.', '/') : null;
         byte[] prevBytes = null;
 
+        Set<String> skipClasses = null;
+        if (!doDesc) {
+            skipClasses = new HashSet<>();
+            if (protectedClasses != null) skipClasses.addAll(protectedClasses);
+            for (int t = 0; t < typeCount; t++) {
+                int tp = typeOff + t * 4;
+                if (tp + 4 > out.length) break;
+                int sIdx = u32(out, tp);
+                if (sIdx < 0 || sIdx >= count) continue;
+                int at = u32(out, idsOff + sIdx * 4);
+                if (at <= 0 || at >= out.length) continue;
+                String desc = readString(out, at);
+                if (desc.length() > 2 && desc.charAt(0) == 'L' && desc.charAt(desc.length() - 1) == ';') {
+                    skipClasses.add(desc.substring(1, desc.length() - 1).replace('/', '.'));
+                }
+            }
+            if (authorityNames != null) skipClasses.removeAll(authorityNames);
+        }
+
         for (int i = 0; i < count; i++) {
             int at = u32(out, idsOff + i * 4);
             if (at <= 0 || at >= out.length) continue;
             String s = readString(out, at);
-            if (s.isEmpty() || (!doDesc && !s.contains("://") && isCodeShape(s))) {
+            if (s.isEmpty() || (!doDesc && !s.contains("://") && (isCodeShape(s) || (skipClasses != null && skipClasses.contains(s))))) {
                 if (doDesc) prevBytes = mutf8(s);
                 continue;
             }
