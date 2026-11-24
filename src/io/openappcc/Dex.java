@@ -3,6 +3,7 @@ package io.openappcc;
 import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -159,7 +160,6 @@ public final class Dex {
         boolean doDesc = renameClasses && oldPkg.length() == newPkg.length() && !oldPkg.equals(newPkg);
         String oldSlash = doDesc ? oldPkg.replace('.', '/') : null;
         String newSlash = doDesc ? newPkg.replace('.', '/') : null;
-        byte[] prevBytes = null;
 
         Set<String> skipClasses = null;
         if (!doDesc) {
@@ -172,12 +172,19 @@ public final class Dex {
             }
         }
 
+        String[] strings = new String[count];
+        Set<String> allStrings = new HashSet<>(count * 2);
+        for (int i = 0; i < count; i++) {
+            int at = u32(out, idsOff + i * 4);
+            strings[i] = (at > 0 && at < out.length) ? readString(out, at) : "";
+            allStrings.add(strings[i]);
+        }
+
         for (int i = 0; i < count; i++) {
             int at = u32(out, idsOff + i * 4);
             if (at <= 0 || at >= out.length) continue;
-            String s = readString(out, at);
+            String s = strings[i];
             if (s.isEmpty() || (!doDesc && !s.contains("://") && (isCodeShape(s) || isProtectedClass(s, skipClasses, authorityNames)))) {
-                if (doDesc) prevBytes = mutf8(s);
                 continue;
             }
 
@@ -202,31 +209,33 @@ public final class Dex {
                 }
             }
             if (next == null || next.equals(s)) {
-                if (doDesc) prevBytes = mutf8(s);
                 continue;
             }
 
             byte[] from = mutf8(s);
             byte[] to = mutf8(next);
-            if (s.length() != next.length() || from.length != to.length) {
+            if (s.length() != next.length() || from.length != to.length || allStrings.contains(next)) {
                 r.skipped++;
-                if (doDesc) prevBytes = from;
                 continue;
             }
-            if (doDesc && prevBytes != null && compareUnsigned(prevBytes, to) > 0) {
-                // Sort order would violate ART DEX verifier; abort descriptor patching for this DEX.
-                r.bytes = src;
-                r.replaced = 0;
-                return r;
-            }
-            if (doDesc) prevBytes = to;
+            allStrings.remove(s);
+            allStrings.add(next);
+            strings[i] = next;
             System.arraycopy(to, 0, out, ulebEnd(out, at), to.length);
             r.replaced++;
             changed = true;
             if (r.changes.size() < 20) r.changes.add(s + " -> " + next);
         }
 
-        if (changed) r.bytes = reseal(out);
+        if (changed) {
+            if (!resortAndRemapStrings(out, count, idsOff, strings)) {
+                r.bytes = src;
+                r.replaced = 0;
+                r.changes.clear();
+                return r;
+            }
+            r.bytes = reseal(out);
+        }
         return r;
     }
 
@@ -247,12 +256,346 @@ public final class Dex {
         return false;
     }
 
-    private static int compareUnsigned(byte[] a, byte[] b) {
-        int lim = Math.min(a.length, b.length);
-        for (int i = 0; i < lim; i++) {
-            int d = (a[i] & 0xff) - (b[i] & 0xff);
-            if (d != 0) return d;
+    private static final byte[] INSN_UNITS = {
+        1,1,2,3,1,2,3,1,2,3,1,1,1,1,1,1, // 00..0f
+        1,1,1,2,3,2,2,3,5,2,2,3,2,1,1,2, // 10..1f
+        2,1,2,2,3,3,3,1,1,2,3,3,3,2,2,2, // 20..2f
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1, // 30..3f
+        1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2, // 40..4f
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, // 50..5f
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3, // 60..6f
+        3,3,3,1,3,3,3,3,3,1,1,1,1,1,1,1, // 70..7f
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, // 80..8f
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, // 90..9f
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, // a0..af
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, // b0..bf
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, // c0..cf
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, // d0..df
+        2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1, // e0..ef
+        1,1,1,1,1,1,1,1,1,1,4,4,3,3,2,2  // f0..ff
+    };
+
+    private static int u16(byte[] b, int p) {
+        return (b[p] & 0xff) | ((b[p + 1] & 0xff) << 8);
+    }
+
+    private static void put16(byte[] b, int p, int v) {
+        b[p] = (byte) v;
+        b[p + 1] = (byte) (v >>> 8);
+    }
+
+    private static int ulebLen(int v) {
+        int n = 1;
+        while ((v >>>= 7) != 0) n++;
+        return n;
+    }
+
+    private static int readUleb(byte[] b, int[] pos) {
+        int p = pos[0], v = 0, s = 0;
+        while (true) {
+            int c = b[p++] & 0xff;
+            v |= (c & 0x7f) << s;
+            if ((c & 0x80) == 0) {
+                pos[0] = p;
+                return v;
+            }
+            s += 7;
         }
-        return a.length - b.length;
+    }
+
+    private static void skipSleb(byte[] b, int[] pos) {
+        int p = pos[0];
+        while ((b[p++] & 0x80) != 0) {}
+        pos[0] = p;
+    }
+
+    private static void writeUleb(byte[] b, int at, int v) {
+        while (v >= 0x80) {
+            b[at++] = (byte) ((v & 0x7f) | 0x80);
+            v >>>= 7;
+        }
+        b[at] = (byte) v;
+    }
+
+    private static boolean remapUlebStringIdx(byte[] out, int[] pos, int[] oldToNew, boolean plusOne, boolean dryRun) {
+        int start = pos[0];
+        int raw = readUleb(out, pos);
+        int oldIdx = plusOne ? raw - 1 : raw;
+        if (oldIdx < 0 || oldIdx >= oldToNew.length) return true;
+        int newIdx = oldToNew[oldIdx];
+        if (newIdx == oldIdx) return true;
+        int newRaw = plusOne ? newIdx + 1 : newIdx;
+        int oldLen = pos[0] - start;
+        if (ulebLen(newRaw) != oldLen) return false;
+        if (!dryRun) writeUleb(out, start, newRaw);
+        return true;
+    }
+
+    private static boolean resortAndRemapStrings(byte[] out, int count, int idsOff, String[] strings) {
+        Integer[] order = new Integer[count];
+        for (int i = 0; i < count; i++) order[i] = i;
+        Arrays.sort(order, (a, b) -> strings[a].compareTo(strings[b]));
+        boolean identity = true;
+        for (int i = 0; i < count; i++) {
+            if (order[i] != i) {
+                identity = false;
+                break;
+            }
+        }
+        if (identity) return true;
+
+        int[] oldToNew = new int[count];
+        for (int newIdx = 0; newIdx < count; newIdx++) {
+            oldToNew[order[newIdx]] = newIdx;
+        }
+        if (!remapStrings(out, oldToNew, true)) return false;
+
+        int[] oldOffs = new int[count];
+        for (int i = 0; i < count; i++) oldOffs[i] = u32(out, idsOff + i * 4);
+        for (int newIdx = 0; newIdx < count; newIdx++) {
+            put32(out, idsOff + newIdx * 4, oldOffs[order[newIdx]]);
+        }
+        return remapStrings(out, oldToNew, false);
+    }
+
+    private static boolean remapStrings(byte[] out, int[] oldToNew, boolean dryRun) {
+        int typeCount = u32(out, 0x40), typeOff = u32(out, 0x44);
+        for (int i = 0; i < typeCount; i++) {
+            int p = typeOff + i * 4;
+            int idx = u32(out, p);
+            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+        }
+        int protoCount = u32(out, 0x48), protoOff = u32(out, 0x4c);
+        for (int i = 0; i < protoCount; i++) {
+            int p = protoOff + i * 12;
+            int idx = u32(out, p);
+            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+        }
+        int fieldCount = u32(out, 0x50), fieldOff = u32(out, 0x54);
+        for (int i = 0; i < fieldCount; i++) {
+            int p = fieldOff + i * 8 + 4;
+            int idx = u32(out, p);
+            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+        }
+        int methodCount = u32(out, 0x58), methodOff = u32(out, 0x5c);
+        for (int i = 0; i < methodCount; i++) {
+            int p = methodOff + i * 8 + 4;
+            int idx = u32(out, p);
+            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+        }
+        int classCount = u32(out, 0x60), classOff = u32(out, 0x64);
+        Set<Integer> visited = new HashSet<>();
+        for (int i = 0; i < classCount; i++) {
+            int cOff = classOff + i * 32;
+            int sfP = cOff + 16;
+            int sfIdx = u32(out, sfP);
+            if (sfIdx >= 0 && sfIdx < oldToNew.length && oldToNew[sfIdx] != sfIdx && !dryRun) put32(out, sfP, oldToNew[sfIdx]);
+
+            int annOff = u32(out, cOff + 20);
+            if (annOff != 0 && visited.add(annOff)) {
+                if (!remapAnnotationsDir(out, annOff, oldToNew, visited, dryRun)) return false;
+            }
+            int dataOff = u32(out, cOff + 24);
+            if (dataOff != 0 && visited.add(dataOff)) {
+                if (!remapClassData(out, dataOff, oldToNew, visited, dryRun)) return false;
+            }
+            int svOff = u32(out, cOff + 28);
+            if (svOff != 0 && visited.add(svOff)) {
+                int[] pos = {svOff};
+                if (!remapEncodedArray(out, pos, oldToNew, dryRun)) return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean remapClassData(byte[] out, int off, int[] oldToNew, Set<Integer> visited, boolean dryRun) {
+        int[] pos = {off};
+        int sf = readUleb(out, pos), inf = readUleb(out, pos), dm = readUleb(out, pos), vm = readUleb(out, pos);
+        for (int i = 0; i < sf + inf; i++) {
+            readUleb(out, pos);
+            readUleb(out, pos);
+        }
+        for (int i = 0; i < dm + vm; i++) {
+            readUleb(out, pos);
+            readUleb(out, pos);
+            int codeOff = readUleb(out, pos);
+            if (codeOff != 0 && visited.add(codeOff)) {
+                if (!remapCodeItem(out, codeOff, oldToNew, visited, dryRun)) return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean remapCodeItem(byte[] out, int codeOff, int[] oldToNew, Set<Integer> visited, boolean dryRun) {
+        int dbgOff = u32(out, codeOff + 8);
+        if (dbgOff != 0 && visited.add(dbgOff)) {
+            if (!remapDebugInfo(out, dbgOff, oldToNew, dryRun)) return false;
+        }
+        int insnsSize = u32(out, codeOff + 12);
+        int insnsStart = codeOff + 16;
+        int pc = 0;
+        while (pc < insnsSize) {
+            int p = insnsStart + pc * 2;
+            int op = out[p] & 0xff;
+            if (op == 0x00) {
+                int sub = u16(out, p);
+                if (sub == 0x0100) {
+                    int sz = u16(out, p + 2);
+                    pc += 4 + sz * 2;
+                    continue;
+                } else if (sub == 0x0200) {
+                    int sz = u16(out, p + 2);
+                    pc += 2 + sz * 4;
+                    continue;
+                } else if (sub == 0x0300) {
+                    int ew = u16(out, p + 2);
+                    int sz = u32(out, p + 4);
+                    pc += 4 + ((sz * ew + 1) / 2);
+                    continue;
+                }
+            } else if (op == 0x1a) {
+                int oldIdx = u16(out, p + 2);
+                if (oldIdx < oldToNew.length && oldToNew[oldIdx] != oldIdx) {
+                    int newIdx = oldToNew[oldIdx];
+                    if (newIdx > 0xffff) return false;
+                    if (!dryRun) put16(out, p + 2, newIdx);
+                }
+            } else if (op == 0x1b) {
+                int oldIdx = u32(out, p + 2);
+                if (oldIdx >= 0 && oldIdx < oldToNew.length && oldToNew[oldIdx] != oldIdx && !dryRun) {
+                    put32(out, p + 2, oldToNew[oldIdx]);
+                }
+            }
+            pc += INSN_UNITS[op];
+        }
+        return true;
+    }
+
+    private static boolean remapDebugInfo(byte[] out, int off, int[] oldToNew, boolean dryRun) {
+        int[] pos = {off};
+        readUleb(out, pos); // line_start
+        int paramSize = readUleb(out, pos);
+        for (int i = 0; i < paramSize; i++) {
+            if (!remapUlebStringIdx(out, pos, oldToNew, true, dryRun)) return false;
+        }
+        while (pos[0] < out.length) {
+            int op = out[pos[0]++] & 0xff;
+            if (op == 0x00) break;
+            switch (op) {
+                case 0x01: readUleb(out, pos); break;
+                case 0x02: skipSleb(out, pos); break;
+                case 0x03:
+                    readUleb(out, pos);
+                    if (!remapUlebStringIdx(out, pos, oldToNew, true, dryRun)) return false;
+                    readUleb(out, pos);
+                    break;
+                case 0x04:
+                    readUleb(out, pos);
+                    if (!remapUlebStringIdx(out, pos, oldToNew, true, dryRun)) return false;
+                    readUleb(out, pos);
+                    if (!remapUlebStringIdx(out, pos, oldToNew, true, dryRun)) return false;
+                    break;
+                case 0x05:
+                case 0x06:
+                    readUleb(out, pos);
+                    break;
+                case 0x09:
+                    if (!remapUlebStringIdx(out, pos, oldToNew, true, dryRun)) return false;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return true;
+    }
+
+    private static boolean remapAnnotationsDir(byte[] out, int off, int[] oldToNew, Set<Integer> visited, boolean dryRun) {
+        int classAnnOff = u32(out, off);
+        int fieldsSize = u32(out, off + 4);
+        int methodsSize = u32(out, off + 8);
+        int paramsSize = u32(out, off + 12);
+        if (classAnnOff != 0 && visited.add(classAnnOff)) {
+            if (!remapAnnotationSet(out, classAnnOff, oldToNew, visited, dryRun)) return false;
+        }
+        int p = off + 16;
+        for (int i = 0; i < fieldsSize + methodsSize; i++, p += 8) {
+            int setOff = u32(out, p + 4);
+            if (setOff != 0 && visited.add(setOff)) {
+                if (!remapAnnotationSet(out, setOff, oldToNew, visited, dryRun)) return false;
+            }
+        }
+        for (int i = 0; i < paramsSize; i++, p += 8) {
+            int refOff = u32(out, p + 4);
+            if (refOff != 0 && visited.add(refOff)) {
+                int cnt = u32(out, refOff);
+                for (int j = 0; j < cnt; j++) {
+                    int setOff = u32(out, refOff + 4 + j * 4);
+                    if (setOff != 0 && visited.add(setOff)) {
+                        if (!remapAnnotationSet(out, setOff, oldToNew, visited, dryRun)) return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean remapAnnotationSet(byte[] out, int off, int[] oldToNew, Set<Integer> visited, boolean dryRun) {
+        int cnt = u32(out, off);
+        for (int i = 0; i < cnt; i++) {
+            int annOff = u32(out, off + 4 + i * 4);
+            if (annOff != 0 && visited.add(annOff)) {
+                int[] pos = {annOff + 1}; // skip visibility byte
+                if (!remapEncodedAnnotation(out, pos, oldToNew, dryRun)) return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean remapEncodedAnnotation(byte[] out, int[] pos, int[] oldToNew, boolean dryRun) {
+        readUleb(out, pos); // type_idx
+        int size = readUleb(out, pos);
+        for (int i = 0; i < size; i++) {
+            if (!remapUlebStringIdx(out, pos, oldToNew, false, dryRun)) return false;
+            if (!remapEncodedValue(out, pos, oldToNew, dryRun)) return false;
+        }
+        return true;
+    }
+
+    private static boolean remapEncodedArray(byte[] out, int[] pos, int[] oldToNew, boolean dryRun) {
+        int size = readUleb(out, pos);
+        for (int i = 0; i < size; i++) {
+            if (!remapEncodedValue(out, pos, oldToNew, dryRun)) return false;
+        }
+        return true;
+    }
+
+    private static boolean remapEncodedValue(byte[] out, int[] pos, int[] oldToNew, boolean dryRun) {
+        int hdr = out[pos[0]++] & 0xff;
+        int type = hdr & 0x1f;
+        int arg = hdr >>> 5;
+        if (type == 0x17) { // VALUE_STRING
+            int sz = arg + 1;
+            int at = pos[0];
+            int oldIdx = 0;
+            for (int i = 0; i < sz; i++) oldIdx |= (out[at + i] & 0xff) << (i * 8);
+            pos[0] = at + sz;
+            if (oldIdx >= 0 && oldIdx < oldToNew.length && oldToNew[oldIdx] != oldIdx) {
+                int newIdx = oldToNew[oldIdx];
+                if (sz < 4 && (newIdx >>> (sz * 8)) != 0) return false;
+                if (!dryRun) {
+                    for (int i = 0; i < sz; i++) out[at + i] = (byte) (newIdx >>> (i * 8));
+                }
+            }
+            return true;
+        } else if (type == 0x1c) {
+            return remapEncodedArray(out, pos, oldToNew, dryRun);
+        } else if (type == 0x1d) {
+            return remapEncodedAnnotation(out, pos, oldToNew, dryRun);
+        } else if (type == 0x1e || type == 0x1f) {
+            return true;
+        } else {
+            pos[0] += arg + 1;
+            return true;
+        }
     }
 }
