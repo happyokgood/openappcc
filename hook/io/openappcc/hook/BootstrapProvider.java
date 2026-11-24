@@ -146,7 +146,13 @@ public final class BootstrapProvider extends ContentProvider {
                     args[0] = clonedPkg;
                 }
             }
-            Object res = method.invoke(real, args);
+            Object res;
+            try {
+                res = method.invoke(real, args);
+            } catch (java.lang.reflect.InvocationTargetException ite) {
+                Throwable cause = ite.getTargetException();
+                throw cause != null ? cause : ite;
+            }
             if (isPkgInfo && res instanceof PackageInfo) {
                 PackageInfo pi = (PackageInfo) res;
                 if (clonedPkg.equals(pi.packageName) || (origPkg != null && origPkg.equals(pi.packageName))) {
@@ -242,7 +248,13 @@ public final class BootstrapProvider extends ContentProvider {
                         iCpClass.getClassLoader(),
                         new Class<?>[]{iCpClass},
                         (p, m, args) -> {
-                            Object res = m.invoke(realCp, args);
+                            Object res;
+                            try {
+                                res = m.invoke(realCp, args);
+                            } catch (java.lang.reflect.InvocationTargetException ite) {
+                                Throwable cause = ite.getTargetException();
+                                throw cause != null ? cause : ite;
+                            }
                             if ("call".equals(m.getName()) && res instanceof Bundle && args != null) {
                                 for (Object a : args) {
                                     if (Settings.Secure.ANDROID_ID.equals(a)) {
