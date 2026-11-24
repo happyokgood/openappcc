@@ -163,10 +163,13 @@ public final class Dex {
 
         Set<String> skipClasses = null;
         if (!doDesc) {
-            skipClasses = new HashSet<>();
-            if (protectedClasses != null) skipClasses.addAll(protectedClasses);
-            collectTypeClasses(out, skipClasses);
-            if (authorityNames != null) skipClasses.removeAll(authorityNames);
+            if (protectedClasses != null) {
+                skipClasses = protectedClasses;
+            } else {
+                skipClasses = new HashSet<>();
+                collectTypeClasses(out, skipClasses);
+                if (authorityNames != null) skipClasses.removeAll(authorityNames);
+            }
         }
 
         for (int i = 0; i < count; i++) {

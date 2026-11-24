@@ -79,8 +79,23 @@ public final class BootstrapProvider extends ContentProvider {
         return true;
     }
 
+    private static void unsealHiddenApis() {
+        if (Build.VERSION.SDK_INT < 28) return;
+        try {
+            Method forName = Class.class.getDeclaredMethod("forName", String.class);
+            Method getDeclaredMethod = Class.class.getDeclaredMethod("getDeclaredMethod", String.class, Class[].class);
+            Class<?> vmRuntimeClass = (Class<?>) forName.invoke(null, "dalvik.system.VMRuntime");
+            Method getRuntime = (Method) getDeclaredMethod.invoke(vmRuntimeClass, "getRuntime", new Class[0]);
+            Method setExemptions = (Method) getDeclaredMethod.invoke(vmRuntimeClass, "setHiddenApiExemptions", new Class[]{String[].class});
+            Object runtime = getRuntime.invoke(null);
+            setExemptions.invoke(runtime, new Object[]{new String[]{"L"}});
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static void installPmHook(Context ctx, String clonedPkg, String origPkg, Signature[] fakeSigs)
             throws Exception {
+        unsealHiddenApis();
         Class<?> atClass = Class.forName("android.app.ActivityThread");
         Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
         currentAt.setAccessible(true);
@@ -142,6 +157,20 @@ public final class BootstrapProvider extends ContentProvider {
                 if (clonedPkg.equals(a0) || clonedPkg.equals(a1)
                         || (origPkg != null && (origPkg.equals(a0) || origPkg.equals(a1)))) {
                     return PackageManager.SIGNATURE_MATCH;
+                }
+            } else if ("hasSigningCertificate".equals(name) && args != null && args.length >= 2
+                    && args[0] instanceof String && args[1] instanceof byte[]) {
+                String p0 = (String) args[0];
+                if (clonedPkg.equals(p0) || (origPkg != null && origPkg.equals(p0))) {
+                    byte[] target = (byte[]) args[1];
+                    for (Signature s : fakeSigs) {
+                        if (java.util.Arrays.equals(s.toByteArray(), target)) return true;
+                        try {
+                            byte[] sha = java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray());
+                            if (java.util.Arrays.equals(sha, target)) return true;
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
             }
             return res;

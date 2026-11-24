@@ -65,6 +65,19 @@
             </LinearLayout>
         </LinearLayout>
 
+        <Button
+            android:id="@+id/btnApplySuggested"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_marginBottom="10dp"
+            android:background="@drawable/bg_btn_secondary"
+            android:text="Apply Suggested Settings"
+            android:textAllCaps="false"
+            android:textColor="@color/accent_dark"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
         <!-- Clone Identity Inputs -->
         <LinearLayout
             android:layout_width="match_parent"

@@ -1016,6 +1016,7 @@ public final class Cloner {
         Axml.setAttr(start, "name", "io.openappcc.hook.BootstrapProvider");
         Axml.setAttr(start, "authorities", newPackage + ".openappcc.bootstrap");
         Axml.setBool(start, "exported", false);
+        Axml.setBool(start, "multiprocess", true);
         Axml.setInt(start, "initOrder", Integer.MAX_VALUE);
 
         Axml.Node end = new Axml.Node();
@@ -1299,7 +1300,7 @@ public final class Cloner {
                 boolean isArsc = "resources.arsc".equals(name);
                 boolean isDex = opts.patchDex && name.matches("classes\\d*\\.dex");
                 boolean isResXml = !opts.isSplit && name.startsWith("res/") && name.endsWith(".xml");
-                boolean deflateSo = opts.compressNativeLibs && name.startsWith("lib/") && name.endsWith(".so");
+                boolean deflateSo = !opts.isSplit && opts.compressNativeLibs && name.startsWith("lib/") && name.endsWith(".so");
                 boolean store = isArsc || (!deflateSo && e.getMethod() == ZipEntry.STORED);
 
                 byte[] data = null;
@@ -1307,7 +1308,7 @@ public final class Cloner {
                     data = newManifest;
                 } else if (isArsc) {
                     Result.stage = "resources.arsc";
-                    data = Arsc.renamePackage(arscBytes, oldPackage, newPackage);
+                    data = Arsc.renamePackage(arscBytes, oldPackage, newPackage, protectedClasses, opts.renameClasses);
                 } else if (isDex) {
                     Result.stage = "dex " + name;
                     try (InputStream in = zip.getInputStream(e)) {
@@ -1417,6 +1418,9 @@ public final class Cloner {
             arscBytes = null;
             newManifest = null;
             iconPatches.clear();
+            protectedClasses.clear();
+            authorityNames.clear();
+            dexFileSha1.clear();
 
             Result.stage = "sign";
             com.android.apksig.ApkSigner.SignerConfig signerConfig =

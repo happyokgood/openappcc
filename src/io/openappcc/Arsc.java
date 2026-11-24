@@ -16,10 +16,15 @@ public final class Arsc {
     }
 
     public static byte[] renamePackage(byte[] arsc, String newPackage) {
-        return renamePackage(arsc, null, newPackage);
+        return renamePackage(arsc, null, newPackage, null, false);
     }
 
     public static byte[] renamePackage(byte[] arsc, String oldPackage, String newPackage) {
+        return renamePackage(arsc, oldPackage, newPackage, null, false);
+    }
+
+    public static byte[] renamePackage(byte[] arsc, String oldPackage, String newPackage,
+                                       Set<String> protectedClasses, boolean renameClasses) {
         if (arsc.length < 12) return arsc;
         ByteBuffer in = ByteBuffer.wrap(arsc).order(ByteOrder.LITTLE_ENDIAN);
         if ((in.getShort(0) & 0xffff) != 0x0002) return arsc;
@@ -27,6 +32,7 @@ public final class Arsc {
         int headerSize = in.getShort(2) & 0xffff;
         byte[] out = arsc.clone();
         boolean patched = false;
+        boolean doClasses = renameClasses && oldPackage != null && oldPackage.length() == newPackage.length();
         int p = headerSize;
         while (p + 8 <= total) {
             int type = in.getShort(p) & 0xffff;
@@ -34,11 +40,9 @@ public final class Arsc {
             if (size < 8 || p + size > total) break;
             if (type == 0x0001 && oldPackage != null && oldPackage.length() == newPackage.length()
                     && !oldPackage.equals(newPackage)) {
-                // shortcut: equal-length in-place global pool patch, upgrade to full pool rewriter for variable lengths
-                if (replaceInRange(out, p, p + size, oldPackage.getBytes(StandardCharsets.UTF_8),
-                        newPackage.getBytes(StandardCharsets.UTF_8))) patched = true;
-                if (replaceInRange(out, p, p + size, oldPackage.getBytes(StandardCharsets.UTF_16LE),
-                        newPackage.getBytes(StandardCharsets.UTF_16LE))) patched = true;
+                if (patchStringPool(in, out, p, p + size, oldPackage, newPackage, protectedClasses, doClasses)) {
+                    patched = true;
+                }
             } else if (type == 0x0200 && p + 268 <= total) {
                 byte[] name = newPackage.getBytes(StandardCharsets.UTF_16LE);
                 if (name.length > 256) throw new IllegalArgumentException("package name too long");
@@ -61,18 +65,69 @@ public final class Arsc {
         return patched ? out : arsc;
     }
 
-    private static boolean replaceInRange(byte[] buf, int from, int to, byte[] needle, byte[] repl) {
-        if (needle.length == 0 || needle.length != repl.length || to - from < needle.length) return false;
+    private static boolean isJavaClass(String s, Set<String> protectedClasses) {
+        if (protectedClasses != null && protectedClasses.contains(s)) return true;
+        int dot = s.lastIndexOf('.');
+        if (dot >= 0 && dot + 1 < s.length()) {
+            String last = s.substring(dot + 1);
+            return Character.isUpperCase(last.charAt(0)) && !last.equals(last.toUpperCase(java.util.Locale.US));
+        }
+        return false;
+    }
+
+    private static boolean patchStringPool(ByteBuffer b, byte[] out, int poolStart, int poolEnd,
+                                           String oldPkg, String newPkg,
+                                           Set<String> protectedClasses, boolean doClasses) {
+        if (poolStart + 28 > poolEnd) return false;
+        int count = b.getInt(poolStart + 8);
+        int flags = b.getInt(poolStart + 16);
+        boolean utf8 = (flags & 0x100) != 0;
+        int strBase = poolStart + b.getInt(poolStart + 20);
+        int offBase = poolStart + 28;
+        if (count <= 0 || (long) offBase + (long) count * 4L > poolEnd) return false;
+
+        byte[] oldU8 = utf8 ? oldPkg.getBytes(StandardCharsets.UTF_8) : null;
+        byte[] newU8 = utf8 ? newPkg.getBytes(StandardCharsets.UTF_8) : null;
+        byte[] oldU16 = utf8 ? null : oldPkg.getBytes(StandardCharsets.UTF_16LE);
+        byte[] newU16 = utf8 ? null : newPkg.getBytes(StandardCharsets.UTF_16LE);
+        if (utf8 ? oldU8.length != newU8.length : oldU16.length != newU16.length) return false;
         boolean hit = false;
-        int limit = to - needle.length;
-        outer:
-        for (int i = from; i <= limit; i++) {
-            for (int j = 0; j < needle.length; j++) {
-                if (buf[i + j] != needle[j]) continue outer;
+        for (int i = 0; i < count; i++) {
+            int off = b.getInt(offBase + i * 4);
+            int p = strBase + off;
+            if (p < strBase || p >= poolEnd) continue;
+            if (utf8) {
+                if (p >= poolEnd) continue;
+                int c = out[p] & 0xff;
+                p += (c & 0x80) != 0 ? 2 : 1;
+                if (p >= poolEnd) continue;
+                int len = out[p++] & 0xff;
+                if ((len & 0x80) != 0 && p < poolEnd) len = ((len & 0x7f) << 8) | (out[p++] & 0xff);
+                if (len < oldU8.length || p + len > poolEnd) continue;
+                String s = new String(out, p, len, StandardCharsets.UTF_8);
+                if (s.equals(oldPkg) || ((s.startsWith(oldPkg + ".") || s.startsWith(oldPkg + ":"))
+                        && (doClasses || !isJavaClass(s, protectedClasses)))) {
+                    System.arraycopy(newU8, 0, out, p, newU8.length);
+                    hit = true;
+                }
+            } else {
+                if (p + 2 > poolEnd) continue;
+                int u16Len = b.getShort(p) & 0xffff;
+                p += 2;
+                if ((u16Len & 0x8000) != 0) {
+                    if (p + 2 > poolEnd) continue;
+                    u16Len = ((u16Len & 0x7fff) << 16) | (b.getShort(p) & 0xffff);
+                    p += 2;
+                }
+                int byteLen = u16Len * 2;
+                if (byteLen < oldU16.length || p + byteLen > poolEnd) continue;
+                String s = new String(out, p, byteLen, StandardCharsets.UTF_16LE);
+                if (s.equals(oldPkg) || ((s.startsWith(oldPkg + ".") || s.startsWith(oldPkg + ":"))
+                        && (doClasses || !isJavaClass(s, protectedClasses)))) {
+                    System.arraycopy(newU16, 0, out, p, newU16.length);
+                    hit = true;
+                }
             }
-            System.arraycopy(repl, 0, buf, i, repl.length);
-            i += repl.length - 1;
-            hit = true;
         }
         return hit;
     }

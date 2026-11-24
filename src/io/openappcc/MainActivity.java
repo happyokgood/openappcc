@@ -270,6 +270,28 @@ public class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((btn, checked) -> prefs.edit().putBoolean(key, checked).apply());
     }
 
+    private static String suggestedPresetLabel(String pkg) {
+        if ("com.whatsapp".equals(pkg) || "com.whatsapp.w4b".equals(pkg)) return "WhatsApp";
+        if ("org.telegram.messenger".equals(pkg) || "org.telegram.messenger.web".equals(pkg)
+                || "org.thunderdog.challegran".equals(pkg)) return "Telegram";
+        return "Recommended";
+    }
+
+    private Cloner.Options buildSuggestedOptions(String pkg) {
+        Cloner.Options o = new Cloner.Options();
+        o.sameLength = true;
+        o.tintIcon = true;
+        o.badgeIcon = true;
+        o.multiColor = true;
+        o.patchDex = true;
+        o.renameClasses = false;
+        o.spoofSignature = true;
+        o.standalone = false;
+        o.compressNativeLibs = false;
+        o.keepDeviceAbiOnly = !"Recommended".equals(suggestedPresetLabel(pkg));
+        return o;
+    }
+
     private Cloner.Options defaultOptions() {
         Cloner.Options o = new Cloner.Options();
         o.sameLength = prefs.getBoolean("sameLength", true);
@@ -709,6 +731,15 @@ public class MainActivity extends Activity {
         spRotateIcon.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View v, int pos, long id) { refreshPreview.run(); }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        Button btnSuggested = view.findViewById(R.id.btnApplySuggested);
+        String presetTag = suggestedPresetLabel(app.pkg);
+        btnSuggested.setText("Apply Suggested Settings (" + presetTag + ")");
+        btnSuggested.setOnClickListener(v -> {
+            Cloner.Options rec = buildSuggestedOptions(app.pkg);
+            applyControls.accept(rec);
+            refreshPreview.run();
+            Toast.makeText(this, "Applied " + presetTag + " suggested settings", Toast.LENGTH_SHORT).show();
         });
         view.findViewById(R.id.btnResetAppDefaults).setOnClickListener(v -> {
             resetAppOptions(app.pkg);
