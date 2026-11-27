@@ -45,12 +45,15 @@ public final class BootstrapProvider extends ContentProvider {
 
             String sigB64 = meta.getString("io.openappcc.ORIGINAL_SIG");
             String origPkg = meta.getString("io.openappcc.ORIGINAL");
+            String fakeAndroidId = meta.getString("io.openappcc.ANDROID_ID");
+            if ((sigB64 != null && !sigB64.isEmpty()) || (fakeAndroidId != null && !fakeAndroidId.isEmpty())) {
+                unsealHiddenApis();
+            }
             if (sigB64 != null && !sigB64.isEmpty()) {
                 byte[] sigBytes = Base64.decode(sigB64, Base64.DEFAULT);
                 installPmHook(ctx, clonedPkg, origPkg, new Signature[]{new Signature(sigBytes)});
             }
 
-            String fakeAndroidId = meta.getString("io.openappcc.ANDROID_ID");
             if (fakeAndroidId != null && !fakeAndroidId.isEmpty()) {
                 installAndroidIdHook(fakeAndroidId);
             }
@@ -95,7 +98,6 @@ public final class BootstrapProvider extends ContentProvider {
 
     private static void installPmHook(Context ctx, String clonedPkg, String origPkg, Signature[] fakeSigs)
             throws Exception {
-        unsealHiddenApis();
         Class<?> atClass = Class.forName("android.app.ActivityThread");
         Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
         currentAt.setAccessible(true);

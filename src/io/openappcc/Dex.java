@@ -173,7 +173,7 @@ public final class Dex {
         }
 
         String[] strings = new String[count];
-        Set<String> allStrings = new HashSet<>(count * 2);
+        Set<String> allStrings = new HashSet<>((int) (count / 0.75f) + 1);
         for (int i = 0; i < count; i++) {
             int at = u32(out, idsOff + i * 4);
             strings[i] = (at > 0 && at < out.length) ? readString(out, at) : "";
@@ -360,10 +360,17 @@ public final class Dex {
 
     private static boolean remapStrings(byte[] out, int[] oldToNew, boolean dryRun) {
         int typeCount = u32(out, 0x40), typeOff = u32(out, 0x44);
+        int prevDesc = -1;
         for (int i = 0; i < typeCount; i++) {
             int p = typeOff + i * 4;
             int idx = u32(out, p);
-            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+            int mapped = (idx >= 0 && idx < oldToNew.length) ? oldToNew[idx] : idx;
+            if (dryRun) {
+                if (mapped <= prevDesc) return false;
+                prevDesc = mapped;
+            } else if (mapped != idx) {
+                put32(out, p, mapped);
+            }
         }
         int protoCount = u32(out, 0x48), protoOff = u32(out, 0x4c);
         for (int i = 0; i < protoCount; i++) {
@@ -372,16 +379,34 @@ public final class Dex {
             if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
         }
         int fieldCount = u32(out, 0x50), fieldOff = u32(out, 0x54);
+        int prevFieldCls = -1, prevFieldName = -1;
         for (int i = 0; i < fieldCount; i++) {
-            int p = fieldOff + i * 8 + 4;
-            int idx = u32(out, p);
-            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+            int p = fieldOff + i * 8;
+            int cls = u16(out, p);
+            int idx = u32(out, p + 4);
+            int mapped = (idx >= 0 && idx < oldToNew.length) ? oldToNew[idx] : idx;
+            if (dryRun) {
+                if (cls == prevFieldCls && mapped < prevFieldName) return false;
+                prevFieldCls = cls;
+                prevFieldName = mapped;
+            } else if (mapped != idx) {
+                put32(out, p + 4, mapped);
+            }
         }
         int methodCount = u32(out, 0x58), methodOff = u32(out, 0x5c);
+        int prevMethodCls = -1, prevMethodName = -1;
         for (int i = 0; i < methodCount; i++) {
-            int p = methodOff + i * 8 + 4;
-            int idx = u32(out, p);
-            if (idx >= 0 && idx < oldToNew.length && oldToNew[idx] != idx && !dryRun) put32(out, p, oldToNew[idx]);
+            int p = methodOff + i * 8;
+            int cls = u16(out, p);
+            int idx = u32(out, p + 4);
+            int mapped = (idx >= 0 && idx < oldToNew.length) ? oldToNew[idx] : idx;
+            if (dryRun) {
+                if (cls == prevMethodCls && mapped < prevMethodName) return false;
+                prevMethodCls = cls;
+                prevMethodName = mapped;
+            } else if (mapped != idx) {
+                put32(out, p + 4, mapped);
+            }
         }
         int classCount = u32(out, 0x60), classOff = u32(out, 0x64);
         Set<Integer> visited = new HashSet<>();
@@ -403,6 +428,23 @@ public final class Dex {
             if (svOff != 0 && visited.add(svOff)) {
                 int[] pos = {svOff};
                 if (!remapEncodedArray(out, pos, oldToNew, dryRun)) return false;
+            }
+        }
+        int mapOff = u32(out, 0x34);
+        if (mapOff > 0 && mapOff + 4 <= out.length) {
+            int mapSize = u32(out, mapOff);
+            for (int i = 0; i < mapSize && mapOff + 4 + (i + 1) * 12 <= out.length; i++) {
+                int itemOff = mapOff + 4 + i * 12;
+                if (u16(out, itemOff) == 0x0007) {
+                    int csCount = u32(out, itemOff + 4);
+                    int csOff = u32(out, itemOff + 8);
+                    for (int j = 0; j < csCount && csOff + (j + 1) * 4 <= out.length; j++) {
+                        int arrOff = u32(out, csOff + j * 4);
+                        if (arrOff != 0 && visited.add(arrOff)) {
+                            if (!remapEncodedArray(out, new int[]{arrOff}, oldToNew, dryRun)) return false;
+                        }
+                    }
+                }
             }
         }
         return true;

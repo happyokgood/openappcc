@@ -1063,6 +1063,7 @@ public final class Cloner {
         Result.stage = "open zip";
         ZipFile zip = new ZipFile(srcApk);
         File unsignedFile = null;
+        ZipOutputStream out = null;
         try {
             ZipEntry manEntry = zip.getEntry("AndroidManifest.xml");
             if (manEntry == null) throw new IllegalStateException("AndroidManifest.xml missing");
@@ -1247,7 +1248,7 @@ public final class Cloner {
             }
             unsignedFile = new File(outFile.getParentFile(), outFile.getName() + ".unsigned");
             Counting counting = new Counting(new BufferedOutputStream(new FileOutputStream(unsignedFile), 1 << 16));
-            ZipOutputStream out = new ZipOutputStream(counting);
+            out = new ZipOutputStream(counting);
             out.setLevel(9);
 
             byte[] copyBuf = new byte[65536];
@@ -1413,6 +1414,7 @@ public final class Cloner {
             out.finish();
             out.flush();
             out.close();
+            out = null;
             zip.close();
             zip = null;
             arscBytes = null;
@@ -1440,6 +1442,12 @@ public final class Cloner {
             result.file = outFile;
             return result;
         } finally {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (Exception ignored) {
+                }
+            }
             if (zip != null) {
                 try {
                     zip.close();
